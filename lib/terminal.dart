@@ -1,30 +1,34 @@
 import 'dart:convert';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:dartssh2/dartssh2.dart';
+import 'package:dartssh2/dartssh2.dart' as dartssh2;
 import 'package:xterm/xterm.dart';
 import 'ssh.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:iconify_flutter/iconify_flutter.dart';
+import 'package:iconify_flutter/icons/material_symbols.dart';
 
 // Terminal Tab Model
 class TerminalTab {
   final String id;
   final String name;
   final Terminal terminal;
-  final TerminalServiceNotifier service;
-  
+  final TerminalService service;
+
   TerminalTab({
     required this.id,
     required this.name,
     required this.terminal,
     required this.service,
   });
-  
+
   TerminalTab copyWith({
     String? id,
     String? name,
     Terminal? terminal,
-    TerminalServiceNotifier? service,
+    TerminalService? service,
   }) {
     return TerminalTab(
       id: id ?? this.id,
@@ -39,12 +43,12 @@ class TerminalTab {
 class TerminalTabsState {
   final List<TerminalTab> tabs;
   final int activeTabIndex;
-  
+
   TerminalTabsState({
     required this.tabs,
     required this.activeTabIndex,
   });
-  
+
   TerminalTabsState copyWith({
     List<TerminalTab>? tabs,
     int? activeTabIndex,
@@ -54,73 +58,127 @@ class TerminalTabsState {
       activeTabIndex: activeTabIndex ?? this.activeTabIndex,
     );
   }
-  
-  TerminalTab? get activeTab => 
-    tabs.isNotEmpty && activeTabIndex >= 0 && activeTabIndex < tabs.length 
-      ? tabs[activeTabIndex] 
-      : null;
+
+  TerminalTab? get activeTab =>
+      tabs.isNotEmpty && activeTabIndex >= 0 && activeTabIndex < tabs.length
+          ? tabs[activeTabIndex]
+          : null;
 }
 
 // Terminal Tabs Provider
-final terminalTabsProvider = StateNotifierProvider<TerminalTabsNotifier, TerminalTabsState>((ref) {
+final terminalTabsProvider =
+    StateNotifierProvider<TerminalTabsNotifier, TerminalTabsState>((ref) {
   final sshService = ref.watch(sshServiceProvider);
-  return TerminalTabsNotifier(sshService);
+  final notifier = TerminalTabsNotifier(sshService, ref);
+
+  // Add a robust listener to always create a tab after any connection
+  ref.listen<SshService>(sshServiceProvider, (previous, next) {
+    debugPrint('TerminalTabsProvider: SSH Service changed: isConnected=${next.isConnected}');
+    if (next.isConnected) {
+      notifier.createNewTab();
+    }
+  });
+
+  return notifier;
 });
 
 // Terminal Tabs Notifier
 class TerminalTabsNotifier extends StateNotifier<TerminalTabsState> {
   final SshService _sshService;
+  final Ref _ref;
   static const int maxTabs = 5; // Maximum number of terminal tabs
-  
-  TerminalTabsNotifier(this._sshService) : super(TerminalTabsState(tabs: [], activeTabIndex: -1)) {
+  static const String _prefsTabsKey = 'terminal_tabs';
+  static const String _prefsActiveTabKey = 'terminal_active_tab';
+  bool _tabsRestored = false;
+
+  TerminalTabsNotifier(this._sshService, this._ref)
+      : super(TerminalTabsState(tabs: [], activeTabIndex: -1)) {
     _initializeFirstTab();
+    _restoreTabsFromPrefs();
+
+    _ref.listen<SshService>(sshServiceProvider, (previous, next) {
+      if (next.isConnected && state.tabs.isEmpty) {
+        createNewTab();
+      }
+    });
   }
-  
+
   void _initializeFirstTab() {
     if (_sshService.isConnected) {
       createNewTab();
     }
   }
-  
+
+  Future<void> _saveTabsToPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final tabNames = state.tabs.map((t) => t.name).toList();
+    await prefs.setStringList(_prefsTabsKey, tabNames);
+    await prefs.setInt(_prefsActiveTabKey, state.activeTabIndex);
+  }
+
+  Future<void> _restoreTabsFromPrefs() async {
+    if (_tabsRestored || state.tabs.isNotEmpty) return;
+    _tabsRestored = true;
+    final prefs = await SharedPreferences.getInstance();
+    final tabNames = prefs.getStringList(_prefsTabsKey);
+    final activeIndex = prefs.getInt(_prefsActiveTabKey) ?? -1;
+    if (tabNames != null &&
+        tabNames.isNotEmpty &&
+        _sshService.isConnected) {
+      final tabs = <TerminalTab>[];
+      for (final name in tabNames) {
+        final tabId = DateTime.now().millisecondsSinceEpoch.toString();
+        final terminal = Terminal();
+        final service = TerminalService(_sshService, terminal);
+        tabs.add(
+            TerminalTab(id: tabId, name: name, terminal: terminal, service: service));
+      }
+      state = TerminalTabsState(
+          tabs: tabs, activeTabIndex: activeIndex.clamp(0, tabs.length - 1));
+    }
+  }
+
   void createNewTab() {
     // Check max tabs limit
     if (state.tabs.length >= maxTabs) {
       return; // Don't create more tabs if at limit
     }
-    
+
     final tabId = DateTime.now().millisecondsSinceEpoch.toString();
     final tabName = 'Terminal ${state.tabs.length + 1}';
     final terminal = Terminal();
-    final service = TerminalServiceNotifier.withTerminal(_sshService, terminal);
-    
+    final service = TerminalService(_sshService, terminal);
+
     final newTab = TerminalTab(
       id: tabId,
       name: tabName,
       terminal: terminal,
       service: service,
     );
-    
+
     state = state.copyWith(
       tabs: [...state.tabs, newTab],
       activeTabIndex: state.tabs.length,
     );
+    _saveTabsToPrefs();
   }
-  
+
   void switchToTab(int index) {
     if (index >= 0 && index < state.tabs.length) {
       state = state.copyWith(activeTabIndex: index);
+      _saveTabsToPrefs();
     }
   }
-  
+
   void closeTab(int index) {
     if (state.tabs.length <= 1) return; // Don't close the last tab
-    
+
     final tabs = List<TerminalTab>.from(state.tabs);
     final closedTab = tabs.removeAt(index);
-    
+
     // Dispose the closed tab's service
     closedTab.service.dispose();
-    
+
     // Adjust active tab index
     int newActiveIndex = state.activeTabIndex;
     if (index == state.activeTabIndex) {
@@ -130,21 +188,23 @@ class TerminalTabsNotifier extends StateNotifier<TerminalTabsState> {
       // If closing tab before active tab, adjust index
       newActiveIndex = state.activeTabIndex - 1;
     }
-    
+
     state = state.copyWith(
       tabs: tabs,
       activeTabIndex: newActiveIndex,
     );
+    _saveTabsToPrefs();
   }
-  
+
   void renameTab(int index, String newName) {
     if (index >= 0 && index < state.tabs.length) {
       final tabs = List<TerminalTab>.from(state.tabs);
       tabs[index] = tabs[index].copyWith(name: newName);
       state = state.copyWith(tabs: tabs);
+      _saveTabsToPrefs();
     }
   }
-  
+
   @override
   void dispose() {
     // Dispose all terminal services
@@ -155,118 +215,72 @@ class TerminalTabsNotifier extends StateNotifier<TerminalTabsState> {
   }
 }
 
-// Keep the original provider for backward compatibility
-final terminalServiceProvider = StateNotifierProvider<TerminalServiceNotifier, Terminal>((ref) {
-  final tabsState = ref.watch(terminalTabsProvider);
-  return tabsState.activeTab?.service ?? TerminalServiceNotifier(ref.watch(sshServiceProvider));
-});
-
-// TerminalService (now a StateNotifier)
-class TerminalServiceNotifier extends StateNotifier<Terminal> {
+// TerminalService
+class TerminalService {
   final SshService _sshService;
-  SSHSession? _shellSession;
+  final Terminal _terminal;
+  dartssh2.SSHSession? _shellSession;
+  StreamSubscription? _stdoutSubscription;
 
-  TerminalServiceNotifier(this._sshService) : super(Terminal()) {
+  TerminalService(this._sshService, this._terminal) {
     _initializeTerminal();
+    _terminal.onResize = (width, height, pixelWidth, pixelHeight) {
+      // Add a small delay to prevent echo in portrait mode
+      Future.delayed(const Duration(milliseconds: 50), () {
+        resize(width, height);
+      });
+    };
+
+    _sshService.addListener(_onSshServiceChange);
   }
-  
-  // Constructor for existing terminal instance
-  TerminalServiceNotifier.withTerminal(this._sshService, Terminal terminal) : super(terminal) {
-    _initializeTerminal();
+
+  void _onSshServiceChange() {
+    if (_sshService.isConnected) {
+      _startShell();
+    }
   }
 
   void _initializeTerminal() {
     if (_sshService.isConnected) {
-      _startInteractiveShell();
+      debugPrint('DEBUG: Initializing terminal service');
+      _startShell();
     }
   }
 
-  Future<void> _startInteractiveShell() async {
-    if (_shellSession != null) {
-      return; // Only start if not already started
-    }
-
-    // DON'T set onOutput - we handle input manually to avoid conflicts
-    // state.onOutput = (data) { ... }; // REMOVED - this was causing conflicts!
-
+  Future<void> _startShell() async {
+    debugPrint('DEBUG: _TerminalScreenState._startShell() - Attempting to start shell.');
     try {
-      _shellSession = await _sshService.startShell();
-      debugPrint('Shell session created successfully'); // Debug
-
-      _shellSession!.stdout.listen((data) {
-        final decoded = utf8.decode(data);
-        // Remove debug logging for better performance
-        state.write(decoded);
-      });
-
-      _shellSession!.stderr.listen((data) {
-        final decoded = utf8.decode(data);
-        // Remove debug logging for better performance
-        state.write(decoded);
-      });
-
-      state.onResize = (cols, rows, pixelWidth, pixelHeight) {
-        _shellSession?.resizeTerminal(cols, rows);
-      };
-
-      _shellSession?.resizeTerminal(state.viewWidth, state.viewHeight);
-      debugPrint('Terminal resized to ${state.viewWidth}x${state.viewHeight}'); // Debug
-      
-      _updateCurrentDirectory(); // Update directory after shell starts
-    } catch (e) {
-      debugPrint('Error starting shell: $e'); // Debug
-    }
-  }
-
-  Future<void> _updateCurrentDirectory() async {
-    try {
-      final currentPath = await _sshService.runCommand('pwd');
-      if (currentPath != null) {
-        // Note: We can't update the provider from here without a ref
-        // This could be handled at a higher level if needed
-        debugPrint('Current directory: ${currentPath.trim()}');
+      _shellSession = await _sshService.shell();
+      if (_shellSession == null) {
+        debugPrint('DEBUG: _TerminalScreenState._startShell() - Shell session is null.');
+        return;
       }
+      debugPrint('DEBUG: _TerminalScreenState._startShell() - Shell session obtained. Listening to stdout.');
+      _stdoutSubscription = _shellSession!.stdout.listen((data) {
+        final output = utf8.decode(data);
+        _terminal.write(output);
+      });
     } catch (e) {
-      debugPrint('Error updating current directory: $e');
+      debugPrint('DEBUG: _TerminalScreenState._startShell() - Shell session error: $e');
     }
   }
 
   void writeToShell(String text) {
-    // Send to SSH shell session for execution
     if (_shellSession != null) {
       _shellSession!.write(utf8.encode(text));
-    } else {
-      debugPrint('No active shell session to write to');
     }
   }
 
-  Future<void> refreshTerminal() async {
-    debugPrint('Refreshing terminal...'); // Debug
-    
-    // Close existing session
-    _shellSession?.close();
-    _shellSession = null;
-    
-    // Create fresh terminal
-    state = Terminal();
-    
-    // Start new shell if connected
-    if (_sshService.isConnected) {
-      await _startInteractiveShell();
-    }
+  void resize(int width, int height) {
+    _shellSession?.resizeTerminal(width, height);
   }
 
-  Future<String?> runCommand(String command) async {
-    if (!_sshService.isConnected) {
-      throw Exception('Not connected to SSH server');
-    }
-    return await _sshService.runCommand(command);
-  }
 
-  @override
+
   void dispose() {
+    _stdoutSubscription?.cancel();
     _shellSession?.close();
-    super.dispose();
+    _sshService.removeListener(_onSshServiceChange);
   }
 }
 
@@ -307,16 +321,16 @@ class TerminalTabBar extends ConsumerWidget {
           Material(
             color: Colors.transparent,
             child: InkWell(
-              onTap: tabsState.tabs.length < TerminalTabsNotifier.maxTabs 
+              onTap: tabsState.tabs.length < TerminalTabsNotifier.maxTabs
                   ? () => tabsNotifier.createNewTab()
                   : null,
-              child: Container(
+              child: SizedBox(
                 width: 40,
                 height: 40,
                 child: Icon(
                   Icons.add,
-                  color: tabsState.tabs.length < TerminalTabsNotifier.maxTabs 
-                      ? Colors.white 
+                  color: tabsState.tabs.length < TerminalTabsNotifier.maxTabs
+                      ? Colors.white
                       : Colors.grey[600],
                   size: 20,
                 ),
@@ -354,7 +368,9 @@ class TerminalTabBar extends ConsumerWidget {
                     style: TextStyle(
                       color: isActive ? Colors.white : Colors.grey[400],
                       fontSize: isActive ? 14 : 12, // Larger font for active tab
-                      fontWeight: isActive ? FontWeight.w600 : FontWeight.normal, // Slightly bolder for active
+                      fontWeight: isActive
+                          ? FontWeight.w600
+                          : FontWeight.normal, // Slightly bolder for active
                     ),
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -364,7 +380,9 @@ class TerminalTabBar extends ConsumerWidget {
                   onTap: onClose,
                   child: Icon(
                     Icons.close,
-                    size: isActive ? 16 : 14, // Slightly larger close icon for active tab
+                    size: isActive
+                        ? 16
+                        : 14, // Slightly larger close icon for active tab
                     color: isActive ? Colors.white : Colors.grey[400],
                   ),
                 ),
@@ -388,62 +406,55 @@ class TerminalScreen extends ConsumerStatefulWidget {
 class _TerminalScreenState extends ConsumerState<TerminalScreen> {
   final FocusNode _terminalFocus = FocusNode();
   final TextEditingController _terminalController = TextEditingController();
-  String _previousText = ''; // Track previous text for backspace detection
 
-  // Command history for easy reference
-  final List<String> _commandHistory = [];
-  
-  void _addToHistory(String command) {
-    if (command.trim().isNotEmpty && !_commandHistory.contains(command.trim())) {
-      _commandHistory.add(command.trim());
-      if (_commandHistory.length > 50) {
-        _commandHistory.removeAt(0); // Keep only last 50 commands
-      }
+  // Track previous input for real-time sync
+  String _previousInput = '';
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Listen for SSH reconnect and restore tabs
+    final sshService = ref.watch(sshServiceProvider);
+    final tabsNotifier = ref.read(terminalTabsProvider.notifier);
+    if (sshService.isConnected) {
+      tabsNotifier._restoreTabsFromPrefs();
     }
   }
-
-
-
-
 
   @override
   void initState() {
     super.initState();
+    _terminalController.addListener(_handleInputChange);
     // Don't auto-focus on init - let user tap to show keyboard
   }
 
   @override
   void dispose() {
     _terminalFocus.dispose();
+    _terminalController.removeListener(_handleInputChange);
     _terminalController.dispose();
     super.dispose();
   }
 
-  void _handleTextChange(String value) {
-    debugPrint('DEBUG: Text changed from "$_previousText" to "$value"');
-    final tabsState = ref.read(terminalTabsProvider);
-    final activeTab = tabsState.activeTab;
-    if (activeTab == null) return;
-    
-    final terminalService = activeTab.service;
-    
-    if (value.length < _previousText.length) {
-      // Text was removed - send backspace(s)
-      int removedCount = _previousText.length - value.length;
-      debugPrint('DEBUG: Sending $removedCount backspace(s)');
-      for (int i = 0; i < removedCount; i++) {
-        terminalService.writeToShell('\x7f'); // DEL character
-      }
-    } else if (value.length > _previousText.length) {
-      // Text was added - send new characters
-      String newChars = value.substring(_previousText.length);
-      debugPrint('DEBUG: Sending new characters: "$newChars"');
-      for (int i = 0; i < newChars.length; i++) {
-        terminalService.writeToShell(newChars[i]);
+  void _handleInputChange() {
+    final current = _terminalController.text;
+    final terminalService = ref.read(terminalTabsProvider).activeTab?.service;
+    if (terminalService == null) return;
+
+    final oldLen = _previousInput.length;
+    final newLen = current.length;
+
+    if (newLen > oldLen) {
+      // Characters added
+      final added = current.substring(oldLen);
+      terminalService.writeToShell(added);
+    } else if (newLen < oldLen) {
+      // Characters deleted (backspace)
+      for (int i = 0; i < oldLen - newLen; i++) {
+        terminalService.writeToShell('\x7f'); // DEL (backspace)
       }
     }
-    
-    _previousText = value;
+    _previousInput = current;
   }
 
   void _insertText(String text) {
@@ -451,14 +462,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     final currentText = _terminalController.text;
     final newText = currentText + text;
     _terminalController.text = newText;
-    
+
     // Move cursor to end
     _terminalController.selection = TextSelection.fromPosition(
       TextPosition(offset: newText.length),
     );
-    
-    // Handle the text change
-    _handleTextChange(newText);
   }
 
   void _sendControlSequence(String sequence) {
@@ -466,19 +474,32 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     final tabsState = ref.read(terminalTabsProvider);
     final activeTab = tabsState.activeTab;
     if (activeTab == null) return;
-    
+
     final terminalService = activeTab.service;
     terminalService.writeToShell(sequence);
+  }
+
+  void _handleHistoryNavigation(String sequence) {
+    // Simply send the arrow key sequence to terminal - let the shell handle history
+    final terminalService = ref.read(terminalTabsProvider).activeTab?.service;
+    if (terminalService == null) return;
+
+    // Send arrow key directly to terminal (traditional terminal behavior)
+    terminalService.writeToShell(sequence);
+    
+    // Clear our input field since terminal is handling the history
+    _terminalController.clear();
+    _previousInput = '';
   }
 
   void _hideKeyboard() {
     // Properly dismiss keyboard and remove focus
     _terminalFocus.unfocus();
     FocusScope.of(context).unfocus();
-    
+
     // Clear any text selection
     _terminalController.selection = const TextSelection.collapsed(offset: 0);
-    
+
     debugPrint('DEBUG: Keyboard hidden');
   }
 
@@ -488,33 +509,28 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     debugPrint('DEBUG: Keyboard shown');
   }
 
-
-
   void _pasteFromClipboard() async {
     try {
       final clipboardData = await Clipboard.getData(Clipboard.kTextPlain);
       if (clipboardData?.text != null && clipboardData!.text!.isNotEmpty) {
         // Clean the pasted text - remove newlines and format for terminal input
         String pasteText = clipboardData.text!.trim();
-        
+
         // If it's a multi-line paste, just take the first line for safety
         if (pasteText.contains('\n')) {
           pasteText = pasteText.split('\n').first.trim();
         }
-        
+
         // Add the text to our current input
         final currentText = _terminalController.text;
         final newText = currentText + pasteText;
         _terminalController.text = newText;
-        
+
         // Move cursor to end
         _terminalController.selection = TextSelection.fromPosition(
           TextPosition(offset: newText.length),
         );
-        
-        // Handle the text change to send to terminal
-        _handleTextChange(newText);
-        
+
         debugPrint('DEBUG: Pasted text: "$pasteText"');
       }
     } catch (e) {
@@ -525,13 +541,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
   void _copyCurrentInput() async {
     // Copy the current input text (what user is typing)
     final currentInput = _terminalController.text;
-    
+
     if (currentInput.isNotEmpty) {
       try {
         await Clipboard.setData(ClipboardData(text: currentInput));
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Current input copied to clipboard', style: TextStyle(color: Colors.white)),
+            content: Text('Current input copied to clipboard',
+                style: TextStyle(color: Colors.white)),
             backgroundColor: Colors.black,
             behavior: SnackBarBehavior.floating,
             duration: Duration(seconds: 1),
@@ -551,17 +568,19 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     final tabsState = ref.read(terminalTabsProvider);
     final activeTab = tabsState.activeTab;
     if (activeTab == null) return;
-    
+
     final terminal = activeTab.terminal;
-    
+
     // Get the terminal content as string and find the last command
     final terminalContent = terminal.buffer.toString();
     final lines = terminalContent.split('\n');
-    
+
     String content = '';
     for (int i = lines.length - 1; i >= 0; i--) {
       final lineText = lines[i].trim();
-      if (lineText.isNotEmpty && !lineText.startsWith('Last login:') && lineText.contains('%')) {
+      if (lineText.isNotEmpty &&
+          !lineText.startsWith('Last login:') &&
+          lineText.contains('%')) {
         // Found a command line, extract the command part
         final parts = lineText.split('%');
         if (parts.length > 1) {
@@ -570,13 +589,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
         }
       }
     }
-    
+
     if (content.isNotEmpty) {
       try {
         await Clipboard.setData(ClipboardData(text: content));
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Last command copied to clipboard', style: TextStyle(color: Colors.white)),
+            content: Text('Last command copied to clipboard',
+                style: TextStyle(color: Colors.white)),
             backgroundColor: Colors.black,
             behavior: SnackBarBehavior.floating,
             duration: Duration(seconds: 1),
@@ -589,7 +609,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     }
   }
 
-  Widget _buildShortcutButton(String text, String sequence, {VoidCallback? onTap, Color? color}) {
+  Widget _buildShortcutButton(String text, String sequence,
+      {VoidCallback? onTap, Color? color}) {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 2.0),
       child: Material(
@@ -618,7 +639,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 2.0),
       child: Material(
-        color: Colors.grey[600],
+        color: Colors.grey[700],
         borderRadius: BorderRadius.circular(6),
         child: InkWell(
           borderRadius: BorderRadius.circular(6),
@@ -634,20 +655,27 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                 insetPadding: const EdgeInsets.all(16),
                 content: SizedBox(
                   width: double.maxFinite,
-                  child: GridView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 2,
-                      childAspectRatio: 2.5,
-                      crossAxisSpacing: 6,
-                      mainAxisSpacing: 6,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: MediaQuery.of(context).size.height * 0.5,
                     ),
-                    itemCount: _ctrlCommands.length,
-                    itemBuilder: (context, index) {
-                      final cmd = _ctrlCommands[index];
-                      return _buildCtrlOption(cmd['command']!, cmd['description']!, cmd['sequence']!);
-                    },
+                    child: GridView.builder(
+                      shrinkWrap: true,
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      gridDelegate:
+                          const SliverGridDelegateWithMaxCrossAxisExtent(
+                        maxCrossAxisExtent: 320,
+                        mainAxisSpacing: 6,
+                        crossAxisSpacing: 6,
+                        childAspectRatio: 2.5,
+                      ),
+                      itemCount: _ctrlCommands.length,
+                      itemBuilder: (context, index) {
+                        final cmd = _ctrlCommands[index];
+                        return _buildCtrlOption(cmd['command']!,
+                            cmd['description']!, cmd['sequence']!);
+                      },
+                    ),
                   ),
                 ),
               ),
@@ -671,13 +699,30 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
 
   // Ctrl commands list
   static const List<Map<String, String>> _ctrlCommands = [
-    {'command': 'Ctrl+C', 'description': 'Interrupt current command', 'sequence': '\x03'},
-    {'command': 'Ctrl+D', 'description': 'End of file / Exit shell', 'sequence': '\x04'},
-    {'command': 'Ctrl+Z', 'description': 'Suspend current process', 'sequence': '\x1a'},
-    {'command': 'Ctrl+L', 'description': 'Clear screen', 'sequence': '\x0c'},
+    {
+      'command': 'Ctrl+C',
+      'description': 'Interrupt current command',
+      'sequence': '\x03'
+    },
+    {
+      'command': 'Ctrl+D',
+      'description': 'End of file / Exit shell',
+      'sequence': '\x04'
+    },
+    {
+      'command': 'Ctrl+Z',
+      'description': 'Suspend current process',
+      'sequence': '\x1a'
+    },
+    {
+      'command': 'Ctrl+L',
+      'description': 'Clear screen',
+      'sequence': '\x0c'
+    },
   ];
 
-  Widget _buildCtrlOption(String command, String description, String sequence) {
+  Widget _buildCtrlOption(
+      String command, String description, String sequence) {
     return InkWell(
       onTap: () {
         Navigator.of(context).pop();
@@ -723,8 +768,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     );
   }
 
-
-
   Widget _buildGitButton(String text) {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 2.0),
@@ -745,20 +788,27 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                 insetPadding: const EdgeInsets.all(16),
                 content: SizedBox(
                   width: double.maxFinite,
-                  child: GridView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 2,
-                      childAspectRatio: 2.5,
-                      crossAxisSpacing: 6,
-                      mainAxisSpacing: 6,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: MediaQuery.of(context).size.height * 0.5,
                     ),
-                    itemCount: _gitCommands.length,
-                    itemBuilder: (context, index) {
-                      final cmd = _gitCommands[index];
-                      return _buildGitOption(cmd['command']!, cmd['description']!);
-                    },
+                    child: GridView.builder(
+                      shrinkWrap: true,
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      gridDelegate:
+                          const SliverGridDelegateWithMaxCrossAxisExtent(
+                        maxCrossAxisExtent: 320,
+                        mainAxisSpacing: 6,
+                        crossAxisSpacing: 6,
+                        childAspectRatio: 2.5,
+                      ),
+                      itemCount: _gitCommands.length,
+                      itemBuilder: (context, index) {
+                        final cmd = _gitCommands[index];
+                        return _buildGitOption(
+                            cmd['command']!, cmd['description']!);
+                      },
+                    ),
                   ),
                 ),
               ),
@@ -782,18 +832,45 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
 
   // Git commands list
   static const List<Map<String, String>> _gitCommands = [
-    {'command': 'git init', 'description': 'Start a new Git repo in the current directory.'},
-    {'command': 'git clone [url]', 'description': 'Copy a remote repository to your server.'},
-    {'command': 'git status', 'description': 'See which files are changed, staged, or untracked.'},
-    {'command': 'git add .', 'description': 'Stage all changes for the next commit.'},
-    {'command': 'git commit -m "message"', 'description': 'Save staged changes with a message.'},
+    {
+      'command': 'git init',
+      'description': 'Start a new Git repo in the current directory.'
+    },
+    {
+      'command': 'git clone [url]',
+      'description': 'Copy a remote repository to your server.'
+    },
+    {
+      'command': 'git status',
+      'description': 'See which files are changed, staged, or untracked.'
+    },
+    {
+      'command': 'git add .',
+      'description': 'Stage all changes for the next commit.'
+    },
+    {
+      'command': 'git commit -m "message"',
+      'description': 'Save staged changes with a message.'
+    },
     {'command': 'git push', 'description': 'Upload commits to the remote repo.'},
-    {'command': 'git pull', 'description': 'Fetch and merge updates from the remote.'},
+    {
+      'command': 'git pull',
+      'description': 'Fetch and merge updates from the remote.'
+    },
     {'command': 'git log', 'description': 'View the history of commits.'},
     {'command': 'git branch', 'description': 'List all local branches.'},
-    {'command': 'git checkout [branch]', 'description': 'Switch to a different branch.'},
-    {'command': 'git checkout -b [new-branch]', 'description': 'Create and switch to a new branch.'},
-    {'command': 'git merge [branch]', 'description': 'Merge another branch into the current one.'},
+    {
+      'command': 'git checkout [branch]',
+      'description': 'Switch to a different branch.'
+    },
+    {
+      'command': 'git checkout -b [new-branch]',
+      'description': 'Create and switch to a new branch.'
+    },
+    {
+      'command': 'git merge [branch]',
+      'description': 'Merge another branch into the current one.'
+    },
   ];
 
   Widget _buildGitOption(String command, String description) {
@@ -801,7 +878,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       onTap: () {
         Navigator.of(context).pop();
         _insertText(command);
-        
+
         // Position cursor between quotes for commit message
         if (command.contains('"message"')) {
           final controller = _terminalController;
@@ -860,20 +937,21 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     final sshService = ref.watch(sshServiceProvider);
     final tabsState = ref.watch(terminalTabsProvider);
     final activeTab = tabsState.activeTab;
-    
+    final orientation = MediaQuery.of(context).orientation;
+    final isPortrait = orientation == Orientation.portrait;
+
     if (!sshService.isConnected) {
-      return const Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.terminal, size: 64, color: Colors.grey),
-            SizedBox(height: 16),
-            Text(
-              'Connect to SSH to use terminal',
-              style: TextStyle(color: Colors.grey, fontSize: 16),
+      return Column(
+        children: [
+          Expanded(
+            child: Center(
+              child: Text(
+                'Connect to your server to use terminal',
+                style: TextStyle(color: Colors.grey, fontSize: 16),
+              ),
             ),
-          ],
-        ),
+          ),
+        ],
       );
     }
 
@@ -892,16 +970,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
         ),
       );
     }
-    
+
     return Scaffold(
       backgroundColor: Colors.black,
-      resizeToAvoidBottomInset: true,
+      resizeToAvoidBottomInset: isPortrait ? false : true,
       body: SafeArea(
         child: Column(
           children: [
             // Terminal tab bar
             const TerminalTabBar(),
-            
+
             // Terminal area with single TextField overlay
             Expanded(
               child: Container(
@@ -917,6 +995,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                       child: Padding(
                         padding: const EdgeInsets.all(8.0),
                         child: TerminalView(
+                          key: ValueKey('terminal_${activeTab.id}_${isPortrait ? 'portrait' : 'landscape'}'),
                           activeTab.terminal,
                           theme: TerminalTheme(
                             background: Colors.black,
@@ -946,44 +1025,89 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                         ),
                       ),
                     ),
-                    
-                    // Invisible TextField for input - covers entire terminal area
-                    Positioned.fill(
+                  ],
+                ),
+              ),
+            ),
+
+            // Terminal input bar
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 0),
+              child: Container(
+                width: double.infinity,
+                color: Colors.black,
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+                child: Row(
+                  children: [
+                    Expanded(
                       child: TextField(
                         controller: _terminalController,
                         focusNode: _terminalFocus,
-                        style: const TextStyle(color: Colors.transparent),
-                        decoration: const InputDecoration(
-                          border: InputBorder.none,
-                          contentPadding: EdgeInsets.zero,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontFamily: 'monospace',
                         ),
-                        cursorColor: Colors.transparent,
-                        maxLines: null,
-                        expands: true,
-                        textInputAction: TextInputAction.send,
-                        onChanged: _handleTextChange,
+                        decoration: InputDecoration(
+                          hintText: 'Type commands here...',
+                          hintStyle: const TextStyle(color: Colors.grey),
+                          filled: true,
+                          fillColor: Colors.black,
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 10),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(
+                                color: Colors.white.withAlpha(51), width: 1.2),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(
+                                color: Colors.white.withAlpha(51), width: 1.2),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(
+                                color: Colors.white.withAlpha(102),
+                                width: 1.8),
+                          ),
+                          prefixIcon: IconButton(
+                            icon: const Iconify(
+                              MaterialSymbols.keyboard_hide_outline_rounded,
+                              color: Colors.white,
+                              size: 20,
+                            ),
+                            onPressed: () {
+                              debugPrint('DEBUG: Hide keyboard icon pressed');
+                              _hideKeyboard();
+                            },
+                            splashRadius: 20,
+                          ),
+                          suffixIcon: IconButton(
+                            icon: const Icon(Icons.send,
+                                color: Colors.white, size: 20),
+                            onPressed: () {
+                              final terminalService = activeTab.service;
+                              // Always send Enter (return key) regardless of input content
+                              terminalService.writeToShell('\r');
+                              // Clear input and reset previous input
+                              _terminalController.clear();
+                              _previousInput = '';
+                              // Hide keyboard for better UX
+                              _hideKeyboard();
+                            },
+                            splashRadius: 20,
+                          ),
+                        ),
                         onSubmitted: (value) {
-                          // Handle return key - send carriage return to execute command
-                          debugPrint('DEBUG: Return key pressed - sending \\r');
-                          
-                          // Add current input to history if it's not empty
-                          if (value.trim().isNotEmpty) {
-                            _addToHistory(value.trim());
-                          }
-                          
                           final terminalService = activeTab.service;
+                          // Always send Enter (return key) regardless of input content
                           terminalService.writeToShell('\r');
-                          
-                          // Clear the text field and reset state
+                          // Clear input and reset previous input
                           _terminalController.clear();
-                          _previousText = '';
-                          
-                          // Keep focus for continued typing only if already focused
-                          if (_terminalFocus.hasFocus) {
-                            Future.microtask(() {
-                              _terminalFocus.requestFocus();
-                            });
-                          }
+                          _previousInput = '';
+                          // Hide keyboard for better UX
+                          _hideKeyboard();
                         },
                       ),
                     ),
@@ -991,56 +1115,55 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                 ),
               ),
             ),
-            
+
             // Keyboard shortcuts row
             Container(
-              height: 50,
+              height: isPortrait ? 40 : 50,
               color: Colors.grey[900],
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(horizontal: 8.0),
                 child: Row(
                   children: [
-                    // Hide keyboard button
-                    _buildShortcutButton('hide', '', onTap: () {
-                      debugPrint('DEBUG: Hide keyboard button pressed');
-                      _hideKeyboard();
-                    }),
-                    
+                    // Control shortcuts first
+                    _buildShortcutButton('esc', '\x1b',
+                        onTap: () => _sendControlSequence('\x1b')),
+
                     // Copy and Paste buttons
                     _buildShortcutButton('cpy', '', onTap: () {
-                      debugPrint('DEBUG: Copy button pressed - copying current input');
+                      debugPrint(
+                          'DEBUG: Copy button pressed - copying current input');
                       _copyCurrentInput();
                     }),
-                    
+
                     _buildShortcutButton('pste', '', onTap: () {
                       debugPrint('DEBUG: Paste button pressed');
                       _pasteFromClipboard();
                     }),
-                    
-                    // Navigation shortcuts
-                    _buildShortcutButton('↑', '\x1b[A', onTap: () => _sendControlSequence('\x1b[A')),
-                    _buildShortcutButton('↓', '\x1b[B', onTap: () => _sendControlSequence('\x1b[B')),
-                    _buildShortcutButton('←', '\x1b[D', onTap: () => _sendControlSequence('\x1b[D')),
-                    _buildShortcutButton('→', '\x1b[C', onTap: () => _sendControlSequence('\x1b[C')),
-                    _buildShortcutButton('tab', '\t'),
-                    
-                    // Control shortcuts
-                    _buildShortcutButton('esc', '\x1b', onTap: () => _sendControlSequence('\x1b')),
+
                     _buildCtrlButton('ctrl'),
-                    
+
+                    // Navigation shortcuts
+                    _buildShortcutButton('↑', '\x1b[A',
+                        onTap: () => _handleHistoryNavigation('\x1b[A')),
+                    _buildShortcutButton('↓', '\x1b[B',
+                        onTap: () => _handleHistoryNavigation('\x1b[B')),
+                    _buildShortcutButton('←', '\x1b[D',
+                        onTap: () => _sendControlSequence('\x1b[D')),
+                    _buildShortcutButton('→', '\x1b[C',
+                        onTap: () => _sendControlSequence('\x1b[C')),
+                    _buildShortcutButton('tab', '\t'),
+
                     // Common symbols
                     _buildShortcutButton('/', '/'),
                     _buildShortcutButton('.', '.'),
                     _buildShortcutButton('~', '~'),
                     _buildShortcutButton('-', '-'),
                     _buildShortcutButton('|', '|'),
-                    _buildShortcutButton('>', '>'),
-                    _buildShortcutButton('<', '<'),
-                    _buildShortcutButton('\\', '\\'),
                     _buildShortcutButton(r'$', r'$'),
                     _buildGitButton('git'),
                     _buildServerButton('srvr'),
+                    _buildFlutterButton('fltr'),
                     _buildBackupButton('bkup'),
                   ],
                 ),
@@ -1072,20 +1195,27 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                 insetPadding: const EdgeInsets.all(16),
                 content: SizedBox(
                   width: double.maxFinite,
-                  child: GridView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 2,
-                      childAspectRatio: 2.5,
-                      crossAxisSpacing: 6,
-                      mainAxisSpacing: 6,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: MediaQuery.of(context).size.height * 0.5,
                     ),
-                    itemCount: _serverCommands.length,
-                    itemBuilder: (context, index) {
-                      final cmd = _serverCommands[index];
-                      return _buildServerOption(cmd['command']!, cmd['description']!);
-                    },
+                    child: GridView.builder(
+                      shrinkWrap: true,
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      gridDelegate:
+                          const SliverGridDelegateWithMaxCrossAxisExtent(
+                        maxCrossAxisExtent: 320,
+                        mainAxisSpacing: 6,
+                        crossAxisSpacing: 6,
+                        childAspectRatio: 2.5,
+                      ),
+                      itemCount: _serverCommands.length,
+                      itemBuilder: (context, index) {
+                        final cmd = _serverCommands[index];
+                        return _buildServerOption(
+                            cmd['command']!, cmd['description']!);
+                      },
+                    ),
                   ),
                 ),
               ),
@@ -1109,18 +1239,42 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
 
   // Server commands list
   static const List<Map<String, String>> _serverCommands = [
-    {'command': 'flutter run -d web-server --web-port=3000', 'description': 'Start Flutter web server on port 3000'},
-    {'command': 'npm start', 'description': 'Start Node.js development server'},
-    {'command': 'npm run dev', 'description': 'Start Node.js dev server (Vite/Next.js)'},
-    {'command': 'yarn start', 'description': 'Start Yarn development server'},
-    {'command': 'yarn dev', 'description': 'Start Yarn dev server (Vite/Next.js)'},
-    {'command': 'python -m http.server 8000', 'description': 'Start Python HTTP server on port 8000'},
-    {'command': 'serve -s build', 'description': 'Serve static files from build directory'},
-    {'command': 'serve -s dist', 'description': 'Serve static files from dist directory'},
-    {'command': 'php -S localhost:8000', 'description': 'Start PHP built-in server on port 8000'},
-    {'command': 'live-server --port=3000', 'description': 'Start live-server with auto-reload'},
-    {'command': 'http-server -p 8080', 'description': 'Start http-server on port 8080'},
-    {'command': 'npx serve -s build -l 3000', 'description': 'Serve build directory using npx'},
+    {
+      'command': 'flutter run -d web-server --web-port=3000 --web-hostname=0.0.0.0',
+      'description': 'Start Flutter web server accessible from mobile'
+    },
+    {
+      'command': 'ssh -R 3000:localhost:3000 -N -f username@server-ip',
+      'description': 'SSH reverse tunnel: server:3000 → Mac:3000 (edit IP)'
+    },
+    {
+      'command': 'npm start',
+      'description': 'Start Node.js development server'
+    },
+    {
+      'command': 'npm run dev',
+      'description': 'Start Node.js dev server (Vite/Next.js)'
+    },
+    {
+      'command': 'yarn start',
+      'description': 'Start Yarn development server'
+    },
+    {
+      'command': 'yarn dev',
+      'description': 'Start Yarn dev server (Vite/Next.js)'
+    },
+    {
+      'command': 'npx serve -s build -p 3000',
+      'description': 'Serve static build files on port 3000'
+    },
+    {
+      'command': 'python -m http.server 8000',
+      'description': 'Quick Python HTTP server for static files'
+    },
+    {
+      'command': 'live-server --port=3000',
+      'description': 'Live-reload server for static files'
+    },
   ];
 
   Widget _buildServerOption(String command, String description) {
@@ -1178,7 +1332,42 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
         child: InkWell(
           borderRadius: BorderRadius.circular(6),
           onTap: () {
-            _insertBackupCommand();
+            // Show a popup with Backup commands matching git/server style
+            showDialog(
+              context: context,
+              barrierColor: Colors.transparent,
+              builder: (context) => AlertDialog(
+                backgroundColor: Colors.transparent,
+                elevation: 0,
+                contentPadding: EdgeInsets.zero,
+                insetPadding: const EdgeInsets.all(16),
+                content: SizedBox(
+                  width: double.maxFinite,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: MediaQuery.of(context).size.height * 0.5,
+                    ),
+                    child: GridView.builder(
+                      shrinkWrap: true,
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      gridDelegate:
+                          const SliverGridDelegateWithMaxCrossAxisExtent(
+                        maxCrossAxisExtent: 320,
+                        mainAxisSpacing: 6,
+                        crossAxisSpacing: 6,
+                        childAspectRatio: 2.5,
+                      ),
+                      itemCount: _backupCommands.length,
+                      itemBuilder: (context, index) {
+                        final cmd = _backupCommands[index];
+                        return _buildBackupOption(
+                            cmd['command']!, cmd['description']!);
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            );
           },
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -1196,60 +1385,228 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     );
   }
 
-  void _insertBackupCommand() {
-    // Show backup options dialog
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: Colors.grey[900],
-        title: const Text('Backup Project', style: TextStyle(color: Colors.white)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            InkWell(
-              onTap: () {
-                Navigator.of(context).pop();
-                _insertText('cp -r . ../project_name_backup');
-                
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Backup command inserted!', style: TextStyle(color: Colors.white)),
-                    backgroundColor: Colors.black,
-                    behavior: SnackBarBehavior.floating,
-                    duration: Duration(seconds: 1),
+  Widget _buildFlutterButton(String text) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 2.0),
+      child: Material(
+        color: Colors.grey[700],
+        borderRadius: BorderRadius.circular(6),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(6),
+          onTap: () {
+            // Show a popup with Flutter commands
+            showDialog(
+              context: context,
+              barrierColor: Colors.transparent,
+              builder: (context) => AlertDialog(
+                backgroundColor: Colors.transparent,
+                elevation: 0,
+                contentPadding: EdgeInsets.zero,
+                insetPadding: const EdgeInsets.all(16),
+                content: SizedBox(
+                  width: double.maxFinite,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: MediaQuery.of(context).size.height * 0.5,
+                    ),
+                    child: GridView.builder(
+                      shrinkWrap: true,
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      gridDelegate:
+                          const SliverGridDelegateWithMaxCrossAxisExtent(
+                        maxCrossAxisExtent: 320,
+                        mainAxisSpacing: 6,
+                        crossAxisSpacing: 6,
+                        childAspectRatio: 2.5,
+                      ),
+                      itemCount: _flutterCommands.length,
+                      itemBuilder: (context, index) {
+                        final cmd = _flutterCommands[index];
+                        return _buildFlutterOption(
+                            cmd['command']!, cmd['description']!);
+                      },
+                    ),
                   ),
-                );
-              },
-              child: Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.grey[800],
-                  borderRadius: BorderRadius.circular(8),
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Creates a backup in the parent directory',
-                      style: TextStyle(color: Colors.grey, fontSize: 12),
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      'cp -r . ../project_name_backup',
-                      style: TextStyle(color: Colors.green, fontSize: 11, fontFamily: 'monospace'),
-                    ),
-                  ],
+              ),
+            );
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Text(
+              text,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Backup commands list
+  static const List<Map<String, String>> _backupCommands = [
+    {
+      'command': 'cp -r . ../project_name_backup',
+      'description': 'Create backup in parent directory'
+    },
+    {
+      'command': 'tar -czf ../project_backup.tar.gz .',
+      'description': 'Create compressed backup archive'
+    },
+    {
+      'command': 'rsync -av . ../project_backup/',
+      'description': 'Sync backup with rsync'
+    },
+    {
+      'command': 'zip -r ../project_backup.zip . -x "node_modules/*" ".git/*"',
+      'description': 'Create zip backup (exclude common folders)'
+    },
+  ];
+
+  Widget _buildBackupOption(String command, String description) {
+    return InkWell(
+      onTap: () {
+        Navigator.of(context).pop();
+        _insertText(command);
+      },
+      child: Container(
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: Colors.grey[800],
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: Colors.grey[700]!, width: 1),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.start,
+          children: [
+            Text(
+              command,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+                fontFamily: 'monospace',
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 4),
+            Expanded(
+              child: Text(
+                description,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 10,
                 ),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel', style: TextStyle(color: Colors.white)),
-          ),
-        ],
+      ),
+    );
+  }
+
+  // Flutter commands list
+  static const List<Map<String, String>> _flutterCommands = [
+    {
+      'command': 'flutter run',
+      'description': 'Run the Flutter app on connected device'
+    },
+    {
+      'command': 'flutter run -d web-server --web-port=3000 --web-hostname=0.0.0.0',
+      'description': 'Run Flutter web app accessible from mobile'
+    },
+    {
+      'command': 'flutter build web',
+      'description': 'Build Flutter app for web deployment'
+    },
+    {
+      'command': 'flutter build apk',
+      'description': 'Build Android APK'
+    },
+    {
+      'command': 'flutter build ios',
+      'description': 'Build iOS app (requires Xcode)'
+    },
+    {
+      'command': 'flutter pub get',
+      'description': 'Get dependencies from pubspec.yaml'
+    },
+    {
+      'command': 'flutter pub add',
+      'description': 'Add a new dependency (add package name)'
+    },
+    {
+      'command': 'flutter clean',
+      'description': 'Clean build cache and artifacts'
+    },
+    {
+      'command': 'flutter doctor',
+      'description': 'Check Flutter installation and setup'
+    },
+    {
+      'command': 'flutter devices',
+      'description': 'List connected devices'
+    },
+    {
+      'command': 'flutter create new_project',
+      'description': 'Create a new Flutter project'
+    },
+    {
+      'command': 'flutter analyze',
+      'description': 'Analyze Dart code for issues'
+    },
+  ];
+
+  Widget _buildFlutterOption(String command, String description) {
+    return InkWell(
+      onTap: () {
+        Navigator.of(context).pop();
+        _insertText(command);
+      },
+      child: Container(
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: Colors.grey[800],
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: Colors.grey[700]!, width: 1),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.start,
+          children: [
+            Text(
+              command,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+                fontFamily: 'monospace',
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 4),
+            Expanded(
+              child: Text(
+                description,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 10,
+                ),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

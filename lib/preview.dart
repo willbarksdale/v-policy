@@ -67,34 +67,83 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     try {
       final sshService = ref.read(sshServiceProvider);
       
-      // Check if server is running on the port
-      final portCheck = await sshService.runCommandLenient(
-        'curl -s -o /dev/null -w "%{http_code}" http://localhost:$port/ 2>/dev/null || echo "0"'
+      // Use SSH server IP for preview
+      final connectedIp = ref.read(connectedIpProvider);
+      String serverHost = connectedIp ?? 'localhost';
+      
+      // For development: if connecting to localhost/127.0.0.1, 
+      // try to get the actual network IP of the development machine
+      if (serverHost == 'localhost' || serverHost == '127.0.0.1') {
+        try {
+          final networkIp = await sshService.runCommandLenient(
+            'ifconfig | grep "inet " | grep -v 127.0.0.1 | head -1 | awk \'{print \$2}\' || hostname -I | awk \'{print \$1}\''
+          );
+          if (networkIp != null && networkIp.trim().isNotEmpty && networkIp.trim() != 'NOT_FOUND') {
+            serverHost = networkIp.trim();
+            debugPrint('Using detected network IP: $serverHost');
+          }
+        } catch (e) {
+          debugPrint('Failed to detect network IP: $e');
+        }
+      }
+      
+      // Check if server is running on the port with multiple methods
+      bool serverFound = false;
+      
+      // Method 1: Check if port is listening
+      final portListening = await sshService.runCommandLenient(
+        'netstat -an | grep ":$port " | grep LISTEN || lsof -i :$port || echo "NOT_LISTENING"'
       );
       
-      if (portCheck?.trim() != "200") {
-        setState(() => _errorMessage = 'No server found on port $port. Please start your development server first.\n\nExample: flutter run -d web-server --web-port=$port');
+      if (portListening != null && !portListening.contains('NOT_LISTENING')) {
+        serverFound = true;
+        debugPrint('Server detected via port check: $portListening');
+      }
+      
+      // Method 2: Try HTTP request if port check passed
+      if (serverFound) {
+        final httpCheck = await sshService.runCommandLenient(
+          'curl -s -m 3 -o /dev/null -w "%{http_code}" http://localhost:$port/ 2>/dev/null || echo "0"'
+        );
+        
+        if (httpCheck?.trim() == "200") {
+          debugPrint('Server confirmed via HTTP check');
+        } else {
+          debugPrint('Port listening but HTTP failed: $httpCheck');
+          // Still proceed - server might be starting up
+        }
+      }
+      
+      if (!serverFound) {
+        setState(() => _errorMessage = 'No server found on port $port. Please start your development server first.\n\nExample: flutter run -d web-server --web-port=$port --web-hostname=0.0.0.0');
         return;
       }
 
-      // Server is running - load the localhost URL
-      final url = 'http://localhost:$port';
+      // Server is running - use the SSH server IP instead of localhost
+      final url = 'http://$serverHost:$port';
+      
+      // Alternative: Try SSH tunnel approach if direct connection fails
+      // This creates a tunnel: SSH_SERVER:$port -> localhost:$port
+      // So we can access via SSH server IP even if Mac is behind NAT
+      
+      // Test if the URL is accessible from the mobile device
+      debugPrint('Testing URL accessibility: $url');
+      try {
+        final testResponse = await sshService.runCommandLenient(
+          'curl -s -I "$url" | head -1 || echo "CURL_FAILED"'
+        );
+        debugPrint('URL test response: $testResponse');
+        
+        if (testResponse?.contains('CURL_FAILED') == true || testResponse?.contains('Connection refused') == true) {
+          setState(() => _errorMessage = 'Server not accessible from mobile device.\n\nIf developing locally:\n• Use Custom URL: http://YOUR_MAC_IP:$port\n• Find your Mac IP: ifconfig | grep "inet "\n\nOr run: flutter run -d web-server --web-port=$port --web-hostname=0.0.0.0');
+          return;
+        }
+      } catch (e) {
+        debugPrint('URL test failed: $e');
+      }
+      
       ref.read(previewUrlProvider.notifier).state = url;
       setState(() => _errorMessage = null);
-      
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Loading preview from $url'),
-            backgroundColor: Colors.black,
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(8),
-              side: BorderSide(color: Colors.white.withValues(alpha: 0.3)),
-            ),
-          ),
-        );
-      }
     } catch (e) {
       setState(() => _errorMessage = 'Error checking server: $e');
     } finally {
@@ -119,6 +168,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     }
   }
 
+
+
   @override
   Widget build(BuildContext context) {
     final previewUrl = ref.watch(previewUrlProvider);
@@ -142,8 +193,6 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
             child: Row(
               children: [
                 const Spacer(),
-                if (!sshService.isConnected)
-                  const Icon(Icons.wifi_off, color: Colors.grey),
               ],
             ),
           ),
@@ -163,16 +212,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.wifi_off, size: 64, color: Colors.grey),
-            SizedBox(height: 16),
-            Text(
-              'Not connected to SSH',
-              style: TextStyle(color: Colors.grey, fontSize: 16),
-            ),
-            SizedBox(height: 8),
             Text(
               'Connect to your server to use preview',
-              style: TextStyle(color: Colors.grey, fontSize: 14),
+              style: TextStyle(color: Colors.grey, fontSize: 16),
             ),
           ],
         ),
@@ -186,69 +228,77 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // Custom URL input section - always visible
+              // Localhost and Custom URL input section on same row
               SizedBox(
-                width: 300,
-                child: TextField(
-                  controller: _customUrlController,
-                  decoration: InputDecoration(
-                    labelText: 'Custom URL (optional)',
-                    labelStyle: const TextStyle(color: Colors.white70),
-                    hintText: 'https://example.com',
-                    hintStyle: const TextStyle(color: Colors.white70),
-                    isDense: true,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.3)),
+                width: 320,
+                child: Row(
+                  children: [
+                    // Localhost field (left side)
+                    Expanded(
+                      flex: 1,
+                      child: TextField(
+                        controller: _portController,
+                        decoration: InputDecoration(
+                          labelText: 'port',
+                          labelStyle: const TextStyle(color: Colors.white70),
+                          hintText: '3000',
+                          hintStyle: const TextStyle(color: Colors.white70),
+                          isDense: true,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.3)),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.3)),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.6)),
+                          ),
+                          filled: true,
+                          fillColor: Colors.black,
+                        ),
+                        style: const TextStyle(color: Colors.white, fontSize: 16),
+                        keyboardType: TextInputType.number,
+                        textAlign: TextAlign.center,
+                      ),
                     ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.3)),
+                    const SizedBox(width: 12),
+                    // Custom URL field (right side, slightly smaller)
+                    Expanded(
+                      flex: 2,
+                      child: TextField(
+                        controller: _customUrlController,
+                        decoration: InputDecoration(
+                          labelText: 'Custom URL (optional)',
+                          labelStyle: const TextStyle(color: Colors.white70),
+                          hintText: 'https://example.com',
+                          hintStyle: const TextStyle(color: Colors.white70),
+                          isDense: true,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.3)),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.3)),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.6)),
+                          ),
+                          filled: true,
+                          fillColor: Colors.black,
+                        ),
+                        style: const TextStyle(color: Colors.white, fontSize: 16),
+                        textAlign: TextAlign.center,
+                      ),
                     ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.6)),
-                    ),
-                    filled: true,
-                    fillColor: Colors.black,
-                  ),
-                  style: const TextStyle(color: Colors.white, fontSize: 16),
-                  textAlign: TextAlign.center,
+                  ],
                 ),
               ),
-              const SizedBox(height: 16),
               
-              // Localhost input section
-              SizedBox(
-                width: 120,
-                child: TextField(
-                  controller: _portController,
-                  decoration: InputDecoration(
-                    labelText: 'localhost',
-                    labelStyle: const TextStyle(color: Colors.white70),
-                    hintText: '3000',
-                    hintStyle: const TextStyle(color: Colors.white70),
-                    isDense: true,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.3)),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.3)),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.6)),
-                    ),
-                    filled: true,
-                    fillColor: Colors.black,
-                  ),
-                  style: const TextStyle(color: Colors.white, fontSize: 16),
-                  keyboardType: TextInputType.number,
-                  textAlign: TextAlign.center,
-                ),
-              ),
 
               // Error message
               if (_errorMessage != null) ...[
@@ -268,40 +318,40 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                 ),
               ],
 
-              const SizedBox(height: 24),
-              
-              // Play button
-              IconButton(
-                icon: _isLoading
-                    ? const SizedBox(
-                        width: 32,
-                        height: 32,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                        ),
-                      )
-                    : const Icon(Icons.play_arrow, color: Colors.white, size: 48),
-                onPressed: _isLoading ? null : _checkServerAndLoad,
-                tooltip: 'Start Preview',
-              ),
-              
               const SizedBox(height: 32),
               
-              // Instructions
+              // Instructions with consistent spacing like info screen
               const Text(
-                '1. Start your dev server in Terminal',
-                style: TextStyle(color: Colors.grey, fontSize: 14),
+                '1. Start your dev server in Terminal:\n   flutter run -d web-server --web-hostname=0.0.0.0\n2. Enter port number above & tap play\n3. View your UI live!',
+                style: TextStyle(
+                  color: Colors.grey, 
+                  fontSize: 14,
+                  height: 1.5,
+                ),
+                textAlign: TextAlign.center,
               ),
-              const SizedBox(height: 16),
-              const Text(
-                '2. Enter port number above & tap play',
-                style: TextStyle(color: Colors.grey, fontSize: 14),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                '3. View your UI live!',
-                style: TextStyle(color: Colors.grey, fontSize: 14),
+              
+              const SizedBox(height: 24),
+              
+                            // Centered, larger play button (moved below instructions)
+              SizedBox(
+                width: 64,
+                height: 64,
+                child: _isLoading 
+                  ? const CircularProgressIndicator(
+                      strokeWidth: 3,
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                    )
+                  : FloatingActionButton(
+                      backgroundColor: Colors.transparent,
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(32),
+                      ),
+                      onPressed: _checkServerAndLoad,
+                      child: const Icon(Icons.play_arrow, size: 28),
+                    ),
               ),
               const SizedBox(height: 24),
               // Remove the examples section completely
@@ -336,26 +386,42 @@ class _PreviewWebViewState extends State<PreviewWebView> {
     super.initState();
     _controller = wv.WebViewController()
       ..setJavaScriptMode(wv.JavaScriptMode.unrestricted)
+      ..setBackgroundColor(Colors.black)
       ..setNavigationDelegate(
         wv.NavigationDelegate(
           onPageStarted: (String url) {
+            debugPrint('WebView: Page started loading: $url');
             setState(() {
               _isLoading = true;
               _loadError = null;
             });
           },
           onPageFinished: (String url) {
+            debugPrint('WebView: Page finished loading: $url');
             setState(() => _isLoading = false);
           },
           onWebResourceError: (wv.WebResourceError error) {
+            debugPrint('WebView: Resource error: ${error.description} (${error.errorCode})');
             setState(() {
               _isLoading = false;
-              _loadError = 'Failed to load: ${error.description}';
+              _loadError = 'Failed to load: ${error.description}\nError code: ${error.errorCode}';
             });
           },
+          onHttpError: (wv.HttpResponseError error) {
+            debugPrint('WebView: HTTP error: ${error.response?.statusCode}');
+            setState(() {
+              _isLoading = false;
+              _loadError = 'HTTP Error: ${error.response?.statusCode}';
+            });
+          },
+          onNavigationRequest: (wv.NavigationRequest request) {
+            debugPrint('WebView: Navigation request to: ${request.url}');
+            return wv.NavigationDecision.navigate;
+          },
         ),
-      )
-      ..loadRequest(Uri.parse(widget.url));
+      );
+    
+    _controller.loadRequest(Uri.parse(widget.url));
   }
 
   @override
@@ -364,16 +430,21 @@ class _PreviewWebViewState extends State<PreviewWebView> {
       children: [
         // URL bar
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-          color: Colors.grey[900],
+          padding: const EdgeInsets.only(left: 6, right: 6, top: 0, bottom: 0.5),
+          decoration: const BoxDecoration(
+            color: Colors.black,
+            border: Border(
+              bottom: BorderSide(color: Colors.white24, width: 1),
+            ),
+          ),
           child: Row(
             children: [
               const Icon(Icons.link, size: 14, color: Colors.grey),
-              const SizedBox(width: 6),
+              const SizedBox(width: 4),
               Expanded(
                 child: Text(
                   widget.url,
-                  style: const TextStyle(color: Colors.grey, fontSize: 11),
+                  style: const TextStyle(color: Colors.white, fontSize: 11),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
@@ -381,14 +452,14 @@ class _PreviewWebViewState extends State<PreviewWebView> {
                 const SizedBox(
                   width: 14,
                   height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 1.5),
+                  child: CircularProgressIndicator(strokeWidth: 1.2),
                 )
               else
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     IconButton(
-                      icon: const Icon(Icons.refresh, size: 16, color: Colors.white),
+                      icon: const Icon(Icons.refresh, size: 14, color: Colors.white),
                       onPressed: () {
                         setState(() {
                           _isLoading = true;
@@ -397,15 +468,15 @@ class _PreviewWebViewState extends State<PreviewWebView> {
                         _controller.reload();
                       },
                       tooltip: 'Refresh',
-                      padding: const EdgeInsets.all(2),
-                      constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                      padding: const EdgeInsets.all(0.5),
+                      constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.close, size: 16, color: Colors.white),
+                      icon: const Icon(Icons.close, size: 14, color: Colors.white),
                       onPressed: widget.onStop,
                       tooltip: 'Stop Preview',
-                      padding: const EdgeInsets.all(2),
-                      constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                      padding: const EdgeInsets.all(0.5),
+                      constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
                     ),
                   ],
                 ),

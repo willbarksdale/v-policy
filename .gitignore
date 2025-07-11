@@ -43,3 +43,10 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# iOS build artifacts
+ios/Runner.xcarchive/
+ios/ExportOptions.plist
+
+# Policy files (separate repo)
+v-policy/
