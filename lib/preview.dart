@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:webview_flutter/webview_flutter.dart' as wv;
 import 'dart:async';
 import 'ssh.dart';
+import 'liquid_glass_play_button.dart';
 
 // Preview settings provider
 final previewUrlProvider = StateProvider<String?>((ref) => null);
@@ -21,6 +22,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   final _customUrlController = TextEditingController();
   bool _isLoading = false;
   String? _errorMessage;
+  bool? _liquidGlassSupported; // null until checked
+  bool _liquidGlassPlayButtonShown = false;
 
   @override
   void initState() {
@@ -28,12 +31,44 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     _portController.addListener(() {
       ref.read(previewPortProvider.notifier).state = _portController.text;
     });
+    
+    // Initialize liquid glass play button
+    _initLiquidGlassPlayButton();
+  }
+  
+  Future<void> _initLiquidGlassPlayButton() async {
+    final supported = await LiquidGlassPlayButton.isSupported();
+    setState(() {
+      _liquidGlassSupported = supported;
+    });
+    
+    if (supported) {
+      // Set up callback for play button taps
+      LiquidGlassPlayButton.setOnPlayButtonTappedCallback(() {
+        _checkServerAndLoad();
+      });
+      
+      // Show the play button
+      final shown = await LiquidGlassPlayButton.show(isLoading: _isLoading);
+      
+      if (shown && mounted) {
+        setState(() {
+          _liquidGlassPlayButtonShown = true;
+        });
+      }
+    }
   }
 
   @override
   void dispose() {
     _portController.dispose();
     _customUrlController.dispose();
+    
+    // Hide liquid glass play button when leaving preview screen
+    if (_liquidGlassPlayButtonShown) {
+      LiquidGlassPlayButton.hide();
+    }
+    
     super.dispose();
   }
 
@@ -63,6 +98,11 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       _isLoading = true;
       _errorMessage = null;
     });
+    
+    // Update liquid glass button state
+    if (_liquidGlassPlayButtonShown) {
+      await LiquidGlassPlayButton.updateState(isLoading: true);
+    }
 
     try {
       final sshService = ref.read(sshServiceProvider);
@@ -149,6 +189,11 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     } finally {
       if (mounted) {
         setState(() => _isLoading = false);
+        
+        // Update liquid glass button state
+        if (_liquidGlassPlayButtonShown) {
+          await LiquidGlassPlayButton.updateState(isLoading: false);
+        }
       }
     }
   }
@@ -176,7 +221,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     final sshService = ref.watch(sshServiceProvider);
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: const Color(0xFF121212),
       body: Column(
         children: [
           // Header with wifi status only
@@ -228,72 +273,64 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // Localhost and Custom URL input section on same row
+              // Port and Custom URL input sections in separate rows
               SizedBox(
-                width: 320,
-                child: Row(
+                width: 400,
+                child: Column(
                   children: [
-                    // Localhost field (left side)
-                    Expanded(
-                      flex: 1,
-                      child: TextField(
-                        controller: _portController,
-                        decoration: InputDecoration(
-                          labelText: 'port',
-                          labelStyle: const TextStyle(color: Colors.white70),
-                          hintText: '3000',
-                          hintStyle: const TextStyle(color: Colors.white70),
-                          isDense: true,
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.3)),
-                          ),
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.3)),
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.6)),
-                          ),
-                          filled: true,
-                          fillColor: Colors.black,
+                    // Port field (top row)
+                    TextField(
+                      controller: _portController,
+                      decoration: InputDecoration(
+                        labelText: 'Port',
+                        labelStyle: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w700, fontSize: 16),
+                        hintText: '3000',
+                        hintStyle: const TextStyle(color: Colors.white70),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
                         ),
-                        style: const TextStyle(color: Colors.white, fontSize: 16),
-                        keyboardType: TextInputType.number,
-                        textAlign: TextAlign.center,
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.6).round())),
+                        ),
+                        filled: true,
+                        fillColor: Colors.black,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
                       ),
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 18),
+                      keyboardType: TextInputType.number,
                     ),
-                    const SizedBox(width: 12),
-                    // Custom URL field (right side, slightly smaller)
-                    Expanded(
-                      flex: 2,
-                      child: TextField(
-                        controller: _customUrlController,
-                        decoration: InputDecoration(
-                          labelText: 'Custom URL (optional)',
-                          labelStyle: const TextStyle(color: Colors.white70),
-                          hintText: 'https://example.com',
-                          hintStyle: const TextStyle(color: Colors.white70),
-                          isDense: true,
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.3)),
-                          ),
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.3)),
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.6)),
-                          ),
-                          filled: true,
-                          fillColor: Colors.black,
+                    const SizedBox(height: 16),
+                    // Custom URL field (bottom row)
+                    TextField(
+                      controller: _customUrlController,
+                      decoration: InputDecoration(
+                        labelText: 'Custom URL (optional)',
+                        labelStyle: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w700, fontSize: 16),
+                        hintText: 'https://example.com',
+                        hintStyle: const TextStyle(color: Colors.white70),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
                         ),
-                        style: const TextStyle(color: Colors.white, fontSize: 16),
-                        textAlign: TextAlign.center,
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.6).round())),
+                        ),
+                        filled: true,
+                        fillColor: Colors.black,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
                       ),
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 18),
                     ),
                   ],
                 ),
@@ -322,9 +359,10 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
               
               // Instructions with consistent spacing like info screen
               const Text(
-                '1. Start your dev server in Terminal:\n   flutter run -d web-server --web-hostname=0.0.0.0\n2. Enter port number above & tap play\n3. View your UI live!',
+                '1. Start your dev server in Terminal\n   2. Enter port number or URL\n3. Tap play & view your UI live!',
                 style: TextStyle(
                   color: Colors.grey, 
+                  fontWeight: FontWeight.w700,
                   fontSize: 14,
                   height: 1.5,
                 ),
@@ -333,27 +371,29 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
               
               const SizedBox(height: 24),
               
-                            // Centered, larger play button (moved below instructions)
-              SizedBox(
-                width: 64,
-                height: 64,
-                child: _isLoading 
-                  ? const CircularProgressIndicator(
-                      strokeWidth: 3,
-                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                    )
-                  : FloatingActionButton(
-                      backgroundColor: Colors.transparent,
-                      foregroundColor: Colors.white,
-                      elevation: 0,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(32),
+              // Centered, larger play button (only show if liquid glass is explicitly not supported)
+              if (_liquidGlassSupported == false)
+                SizedBox(
+                  width: 64,
+                  height: 64,
+                  child: _isLoading 
+                    ? const CircularProgressIndicator(
+                        strokeWidth: 3,
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                      )
+                    : FloatingActionButton(
+                        backgroundColor: Colors.transparent,
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(32),
+                        ),
+                        onPressed: _checkServerAndLoad,
+                        child: const Icon(Icons.play_arrow, size: 28),
                       ),
-                      onPressed: _checkServerAndLoad,
-                      child: const Icon(Icons.play_arrow, size: 28),
-                    ),
-              ),
-              const SizedBox(height: 24),
+                ),
+              if (_liquidGlassSupported == false) const SizedBox(height: 24),
+              if (_liquidGlassSupported == true) const SizedBox(height: 100), // Extra space when using liquid glass button
               // Remove the examples section completely
             ],
           ),

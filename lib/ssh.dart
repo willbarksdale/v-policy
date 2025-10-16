@@ -2,16 +2,20 @@ import 'package:dartssh2/dartssh2.dart' as dartssh2;
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:iconify_flutter/iconify_flutter.dart';
 import 'package:iconify_flutter/icons/mdi.dart';
 import 'package:iconify_flutter/icons/material_symbols.dart';
-import 'edit.dart';
 import 'terminal.dart';
 import 'preview.dart';
 import 'info.dart';
+import 'liquid_glass_nav.dart';
+import 'liquid_glass_power_button.dart';
+import 'liquid_glass_info_button.dart';
+import 'liquid_glass_back_button.dart';
 
 // SshService - Simplified for better shell session management
 class SshService extends ChangeNotifier {
@@ -242,9 +246,16 @@ class SshService extends ChangeNotifier {
       return null;
     }
     try {
-      debugPrint('DEBUG: SshService.shell() - Attempting to open shell.');
-      final session = await _client!.shell();
-      debugPrint('DEBUG: SshService.shell() - Shell opened successfully.');
+      debugPrint('DEBUG: SshService.shell() - Attempting to open shell with PTY and xterm-256color.');
+      // Request a proper PTY with xterm-256color terminal type for full permissions and compatibility
+      final session = await _client!.shell(
+        pty: dartssh2.SSHPtyConfig(
+          type: 'xterm-256color',
+          width: 80,
+          height: 24,
+        ),
+      );
+      debugPrint('DEBUG: SshService.shell() - Shell with PTY (xterm-256color) opened successfully.');
       return session;
     } catch (e) {
       debugPrint('DEBUG: SshService.shell() - Error opening shell: $e');
@@ -385,6 +396,11 @@ class SshService extends ChangeNotifier {
     return await _client!.sftp();
   }
 
+  // DEPRECATED: These methods are from the old file tree editor
+  // They are no longer used since we simplified the edit screen
+  // Keeping them commented out in case we need them later
+  
+  /*
   Future<List<FileSystemEntity>> listDirectory(String path) async {
     if (!isConnected) {
       throw Exception('Not connected to SSH server');
@@ -464,6 +480,7 @@ class SshService extends ChangeNotifier {
     // This should never be reached due to rethrow above, but just in case
     throw Exception('Failed to list directory after $maxRetries attempts');
   }
+  */
 
   Future<String?> readFile(String path) async {
     if (!isConnected) {
@@ -657,6 +674,9 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
   late final TextEditingController _passwordController;
   late final TextEditingController _privateKeyController;
   late final TextEditingController _privateKeyPassphraseController;
+  bool _liquidGlassSupported = false;
+  bool _liquidGlassPowerButtonShown = false;
+  bool _liquidGlassInfoButtonShown = false;
 
   @override
   void initState() {
@@ -668,6 +688,105 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
     _passwordController = TextEditingController(text: credentials?['password'] ?? '');
     _privateKeyController = TextEditingController(text: credentials?['privateKey'] ?? '');
     _privateKeyPassphraseController = TextEditingController(text: '');
+    
+    // Initialize liquid glass buttons
+    _initLiquidGlassButtons();
+  }
+  
+  Future<void> _initLiquidGlassButtons() async {
+    _liquidGlassSupported = await LiquidGlassPowerButton.isSupported();
+    if (_liquidGlassSupported) {
+      // Initialize power button
+      await _initLiquidGlassPowerButton();
+      
+      // Initialize info button
+      await _initLiquidGlassInfoButton();
+    }
+  }
+  
+  Future<void> _initLiquidGlassPowerButton() async {
+    // Set up callback for power button taps
+    LiquidGlassPowerButton.setOnPowerButtonTappedCallback(() {
+      _handlePowerButtonTap();
+    });
+    
+    // Show the power button with initial connection state
+    final currentSshService = ref.read(sshServiceProvider);
+    final shown = await LiquidGlassPowerButton.show(
+      isConnected: currentSshService.isConnected,
+    );
+    
+    if (shown && mounted) {
+      setState(() {
+        _liquidGlassPowerButtonShown = true;
+      });
+    }
+  }
+  
+  Future<void> _initLiquidGlassInfoButton() async {
+    // Set up callback for info button taps
+    LiquidGlassInfoButton.setOnInfoButtonTappedCallback(() async {
+      // Hide buttons before navigating
+      await LiquidGlassPowerButton.hide();
+      await LiquidGlassInfoButton.hide();
+      
+      if (mounted) {
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (context) => const InfoScreenFullPage(),
+          ),
+        );
+        
+        // Show buttons again when returning
+        if (mounted && _liquidGlassSupported) {
+          final currentSshService = ref.read(sshServiceProvider);
+          await LiquidGlassPowerButton.show(isConnected: currentSshService.isConnected);
+          await LiquidGlassInfoButton.show();
+        }
+      }
+    });
+    
+    // Show the info button
+    final shown = await LiquidGlassInfoButton.show();
+    
+    if (shown && mounted) {
+      setState(() {
+        _liquidGlassInfoButtonShown = true;
+      });
+    }
+  }
+  
+  void _handlePowerButtonTap() {
+    final currentSshService = ref.read(sshServiceProvider);
+    if (currentSshService.isConnected) {
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          backgroundColor: Colors.black,
+          title: const Text(
+            'End session?',
+            style: TextStyle(color: Colors.white, fontSize: 20),
+            textAlign: TextAlign.center,
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actions: [
+            IconButton(
+              onPressed: () => Navigator.pop(context),
+              icon: const Icon(Icons.close, color: Colors.white),
+            ),
+            IconButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _disconnect();
+              },
+              icon: const Icon(Icons.check, color: Colors.white),
+            ),
+          ],
+        ),
+      );
+    } else {
+      _connect();
+    }
   }
 
   @override
@@ -678,6 +797,15 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
     _passwordController.dispose();
     _privateKeyController.dispose();
     _privateKeyPassphraseController.dispose();
+    
+    // Hide liquid glass buttons when leaving SSH screen
+    if (_liquidGlassPowerButtonShown) {
+      LiquidGlassPowerButton.hide();
+    }
+    if (_liquidGlassInfoButtonShown) {
+      LiquidGlassInfoButton.hide();
+    }
+    
     // Do NOT disconnect here. Only dispose controllers.
     super.dispose();
   }
@@ -717,6 +845,11 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
         );
         ref.read(connectedIpProvider.notifier).state = _ipController.text;
         ref.read(connectedUsernameProvider.notifier).state = _usernameController.text;
+        
+        // Update liquid glass power button state to connected (blue)
+        if (_liquidGlassPowerButtonShown) {
+          await LiquidGlassPowerButton.updateState(isConnected: true);
+        }
       } catch (e) {
         // Provide more specific error messages
         String errorMessage = 'Failed to connect';
@@ -760,6 +893,11 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
       ref.read(connectedIpProvider.notifier).state = null;
       ref.read(connectedUsernameProvider.notifier).state = null;
       
+      // Update liquid glass power button state to disconnected
+      if (_liquidGlassPowerButtonShown) {
+        await LiquidGlassPowerButton.updateState(isConnected: false);
+      }
+      
       // Force UI refresh by triggering a rebuild
       if (mounted) {
         setState(() {});
@@ -788,9 +926,9 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
     final isPasswordVisible = ref.watch(sshPasswordVisibleProvider);
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: const Color(0xFF121212),
       appBar: AppBar(
-        backgroundColor: Colors.black,
+        backgroundColor: const Color(0xFF121212),
         elevation: 0,
         centerTitle: true,
       ),
@@ -809,7 +947,7 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                       'Create the future.',
                       style: TextStyle(
                         fontSize: 32,
-                        fontWeight: FontWeight.w400,
+                        fontWeight: FontWeight.w700,
                         color: Colors.white,
                         letterSpacing: 0.8,
                         shadows: [
@@ -828,13 +966,13 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                     Row(
                       children: [
                         Expanded(
-                          flex: 1,
+                          flex: 6,
                           child: TextFormField(
                             controller: _ipController,
-                            decoration: InputDecoration(
+                              decoration: InputDecoration(
                               labelText: 'Server IP',
-                              labelStyle: const TextStyle(color: Colors.white70),
-                              suffixIcon: Consumer(
+                              labelStyle: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w700, fontSize: 16),
+                              suffixIcon: _liquidGlassSupported ? null : Consumer(
                                 builder: (context, ref, child) {
                                   final currentSshService = ref.watch(sshServiceProvider);
                                   final currentIsLoading = ref.watch(sshIsLoadingProvider);
@@ -847,13 +985,20 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                                           valueColor: AlwaysStoppedAnimation<Color>(Colors.white70),
                                         ),
                                       )
-                                    : IconButton(
-                                        icon: Icon(
-                                          Icons.power_settings_new, 
-                                          size: 20, 
-                                          color: currentSshService.isConnected ? Colors.green : Colors.white70,
+                                    : Container(
+                                        width: 20,
+                                        height: 20,
+                                        decoration: const BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          color: Colors.transparent,
                                         ),
-                                        onPressed: () {
+                                        child: IconButton(
+                                          icon: Icon(
+                                            CupertinoIcons.power, 
+                                            size: 16, 
+                                            color: currentSshService.isConnected ? Colors.blue : Colors.white70,
+                                          ),
+                                          onPressed: () {
                                           if (currentSshService.isConnected) {
                                             showDialog(
                                               context: context,
@@ -884,7 +1029,8 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                                             _connect();
                                           }
                                         },
-                                      );
+                                      ),
+                                    );
                                 },
                               ),
                               border: OutlineInputBorder(
@@ -901,23 +1047,24 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                               ),
                               filled: true,
                               fillColor: Colors.black,
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
                             ),
-                            style: const TextStyle(color: Colors.white),
+                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 18),
                             validator: (value) => value!.isEmpty ? 'Required' : null,
                           ),
                         ),
                         const SizedBox(width: 16),
                         Expanded(
-                          flex: 1,
+                          flex: 4,
                           child: TextFormField(
                             controller: _portController,
                             decoration: InputDecoration(
                               labelText: 'Port',
-                              labelStyle: const TextStyle(color: Colors.white70),
-                              suffixIcon: IconButton(
-                                icon: const Icon(Icons.info_outline, size: 20, color: Colors.white70),
-                                onPressed: () {
-                                  Navigator.of(context).push(
+                              labelStyle: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w700, fontSize: 16),
+                              suffixIcon: _liquidGlassSupported ? null : IconButton(
+                                icon: const Icon(CupertinoIcons.info, size: 20, color: Colors.white70),
+                                onPressed: () async {
+                                  await Navigator.of(context).push(
                                     MaterialPageRoute(
                                       builder: (context) => const InfoScreenFullPage(),
                                     ),
@@ -938,8 +1085,9 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                               ),
                               filled: true,
                               fillColor: Colors.black,
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
                             ),
-                            style: const TextStyle(color: Colors.white),
+                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 18),
                             validator: (value) => value!.isEmpty ? 'Required' : null,
                           ),
                         ),
@@ -948,79 +1096,74 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                     
                     const SizedBox(height: 16),
                     
-                    // Username and Password fields
-                    Row(
-                      children: [
-                        Expanded(
-                          flex: 1,
-                          child: TextFormField(
-                            controller: _usernameController,
-                            decoration: InputDecoration(
-                              labelText: 'Username',
-                              labelStyle: const TextStyle(color: Colors.white70),
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
-                              ),
-                              enabledBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
-                              ),
-                              focusedBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.6).round())),
-                              ),
-                              filled: true,
-                              fillColor: Colors.black,
-                            ),
-                            style: const TextStyle(color: Colors.white),
-                            validator: (value) => value!.isEmpty ? 'Required' : null,
-                          ),
+                    // Username Field (Full Width)
+                    TextFormField(
+                      controller: _usernameController,
+                      decoration: InputDecoration(
+                        labelText: 'Username',
+                        labelStyle: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w700, fontSize: 16),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
                         ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          flex: 1,
-                          child: TextFormField(
-                            controller: _passwordController,
-                            decoration: InputDecoration(
-                              labelText: 'Password',
-                              labelStyle: const TextStyle(color: Colors.white70),
-                              suffixIcon: IconButton(
-                                icon: Icon(
-                                  isPasswordVisible ? Icons.visibility : Icons.visibility_off,
-                                  size: 20,
-                                  color: Colors.white70,
-                                ),
-                                onPressed: () {
-                                  ref.read(sshPasswordVisibleProvider.notifier).state = !isPasswordVisible;
-                                },
-                              ),
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
-                              ),
-                              enabledBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
-                              ),
-                              focusedBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.6).round())),
-                              ),
-                              filled: true,
-                              fillColor: Colors.black,
-                            ),
-                            style: const TextStyle(color: Colors.white),
-                            obscureText: !isPasswordVisible,
-                            validator: (value) {
-                              if (value!.isEmpty && _privateKeyController.text.isEmpty) {
-                                return 'Password or private key required';
-                              }
-                              return null;
-                            },
-                          ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
                         ),
-                      ],
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.6).round())),
+                        ),
+                        filled: true,
+                        fillColor: Colors.black,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+                      ),
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 18),
+                      validator: (value) => value!.isEmpty ? 'Required' : null,
+                    ),
+                    
+                    const SizedBox(height: 16),
+                    
+                    // Password Field (Full Width)
+                    TextFormField(
+                      controller: _passwordController,
+                      decoration: InputDecoration(
+                        labelText: 'Password',
+                        labelStyle: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w700, fontSize: 16),
+                        suffixIcon: IconButton(
+                          icon: Icon(
+                            CupertinoIcons.eye,
+                            size: 20,
+                            color: isPasswordVisible ? Colors.white : Colors.white70,
+                          ),
+                          onPressed: () {
+                            ref.read(sshPasswordVisibleProvider.notifier).state = !isPasswordVisible;
+                          },
+                        ),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.6).round())),
+                        ),
+                        filled: true,
+                        fillColor: Colors.black,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+                      ),
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 18),
+                      obscureText: !isPasswordVisible,
+                      validator: (value) {
+                        if (value!.isEmpty && _privateKeyController.text.isEmpty) {
+                          return 'Password or private key required';
+                        }
+                        return null;
+                      },
                     ),
 
                     const SizedBox(height: 16),
@@ -1030,7 +1173,7 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                       controller: _privateKeyController,
                       decoration: InputDecoration(
                         labelText: 'Private Key (optional)',
-                        labelStyle: const TextStyle(color: Colors.white70),
+                        labelStyle: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w700, fontSize: 16),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(12),
                           borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
@@ -1045,9 +1188,9 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                         ),
                         filled: true,
                         fillColor: Colors.black,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
                       ),
-                      style: const TextStyle(color: Colors.white),
-                      maxLines: null,
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 18),
                       textInputAction: TextInputAction.done,
                     ),
                     const SizedBox(height: 16),
@@ -1056,7 +1199,7 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                       controller: _privateKeyPassphraseController,
                       decoration: InputDecoration(
                         labelText: 'Private Key Passphrase (optional)',
-                        labelStyle: const TextStyle(color: Colors.white70),
+                        labelStyle: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w700, fontSize: 16),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(12),
                           borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
@@ -1071,11 +1214,13 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                         ),
                         filled: true,
                         fillColor: Colors.black,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
                       ),
-                      style: const TextStyle(color: Colors.white),
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 18),
                       obscureText: !isPasswordVisible,
                       textInputAction: TextInputAction.done,
                     ),
+                    
                   ],
                 ),
               ),
@@ -1099,10 +1244,10 @@ class HomeScreen extends ConsumerStatefulWidget {
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   int _selectedIndex = 0;
   bool _checkingConnection = false;
+  bool _useLiquidGlass = false;
 
   static final List<Widget> _widgetOptions = <Widget>[
     const SSHSession(),
-    const EditorScreen(),
     const TerminalScreen(),
     const PreviewScreen(),
   ];
@@ -1110,10 +1255,36 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    _initLiquidGlass();
     // Schedule connection check after build
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkConnection();
     });
+  }
+  
+  Future<void> _initLiquidGlass() async {
+    final supported = await LiquidGlassNav.isSupported();
+    if (supported) {
+      await LiquidGlassNav.initialize((action) {
+        // Handle navigation from native iOS
+        final index = switch (action) {
+          'ssh' => 0,
+          'terminal' => 1,
+          'preview' => 2,
+          _ => 0,
+        };
+        setState(() {
+          _selectedIndex = index;
+        });
+        _checkConnection();
+      });
+      
+      await LiquidGlassNav.show();
+      
+      setState(() {
+        _useLiquidGlass = true;
+      });
+    }
   }
 
   Future<void> _checkConnection() async {
@@ -1135,6 +1306,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       _selectedIndex = index;
     });
     
+    // Sync with native iOS if using Liquid Glass
+    if (_useLiquidGlass) {
+      LiquidGlassNav.setSelectedTab(index);
+    }
+    
     // Check connection when switching tabs
     _checkConnection();
   }
@@ -1149,42 +1325,110 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
 
     return Scaffold(
+      extendBody: true,
       body: Center(
         child: _widgetOptions.elementAt(_selectedIndex),
       ),
-      bottomNavigationBar: Theme(
-        data: Theme.of(context).copyWith(
-          splashColor: Colors.transparent,
-          highlightColor: Colors.transparent,
+      // Only show Flutter bottom nav if Liquid Glass is not available
+      bottomNavigationBar: _useLiquidGlass ? null : LiquidGlassBottomNav(
+        selectedIndex: _selectedIndex,
+        onItemTapped: _onItemTapped,
+      ),
+    );
+  }
+}
+
+// Liquid Glass Bottom Navigation Bar
+class LiquidGlassBottomNav extends StatelessWidget {
+  final int selectedIndex;
+  final Function(int) onItemTapped;
+
+  const LiquidGlassBottomNav({
+    super.key,
+    required this.selectedIndex,
+    required this.onItemTapped,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final items = [
+      (icon: Mdi.chevron_up, label: 'SSH'),
+      (icon: MaterialSymbols.chevron_right, label: 'Terminal'),
+      (icon: Mdi.chevron_down, label: 'Preview'),
+    ];
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: Colors.white.withValues(alpha:0.2),
+          width: 1,
         ),
-        child: BottomNavigationBar(
-          items: <BottomNavigationBarItem>[
-            BottomNavigationBarItem(
-              icon: Iconify(Mdi.chevron_up, color: Colors.white),
-              label: 'SSH',
+        boxShadow: [
+          BoxShadow(
+            color: Colors.white.withValues(alpha: 0.1),
+            blurRadius: 20,
+            offset: const Offset(0, -5),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
+        children: List.generate(items.length, (index) {
+          final item = items[index];
+          final isSelected = selectedIndex == index;
+          
+          return Expanded(
+            child: GestureDetector(
+              onTap: () => onItemTapped(index),
+              behavior: HitTestBehavior.opaque,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeInOut,
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Center(
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 300),
+                    curve: Curves.easeInOut,
+                    padding: const EdgeInsets.all(12),
+                    decoration: isSelected
+                        ? BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [
+                                Colors.white.withValues(alpha: 0.15),
+                                Colors.white.withValues(alpha: 0.05),
+                              ],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
+                              color: Colors.white.withValues(alpha: 0.3),
+                              width: 1,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.white.withValues(alpha:0.2),
+                                blurRadius: 10,
+                                offset: const Offset(0, 2),
+                              ),
+                            ],
+                          )
+                        : null,
+                    child: Iconify(
+                      item.icon,
+                      color: isSelected ? Colors.white : Colors.white.withValues(alpha: 0.5),
+                      size: 24,
+                    ),
+                  ),
+                ),
+              ),
             ),
-            BottomNavigationBarItem(
-              icon: Iconify(MaterialSymbols.chevron_left, color: Colors.white,),
-              label: 'Edit',
-            ),
-            BottomNavigationBarItem(
-              icon: Iconify(MaterialSymbols.chevron_right, color: Colors.white,),
-              label: 'Terminal',
-            ),
-            BottomNavigationBarItem(
-              icon: Iconify(Mdi.chevron_down, color: Colors.white,),
-              label: 'Preview',
-            ),
-          ],
-          currentIndex: _selectedIndex,
-          selectedItemColor: Colors.white,
-          unselectedItemColor: Colors.grey,
-          onTap: _onItemTapped,
-          type: BottomNavigationBarType.fixed,
-          enableFeedback: false,
-          backgroundColor: Colors.black,
-          elevation: 0,
-        ),
+          );
+        }),
       ),
     );
   }
@@ -1202,20 +1446,65 @@ class NoGlowScrollBehavior extends ScrollBehavior {
   }
 }
 
-class InfoScreenFullPage extends StatelessWidget {
+class InfoScreenFullPage extends StatefulWidget {
   const InfoScreenFullPage({super.key});
+
+  @override
+  State<InfoScreenFullPage> createState() => _InfoScreenFullPageState();
+}
+
+class _InfoScreenFullPageState extends State<InfoScreenFullPage> {
+  bool _liquidGlassSupported = false;
+  bool _liquidGlassBackButtonShown = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initLiquidGlassBackButton();
+  }
+
+  Future<void> _initLiquidGlassBackButton() async {
+    _liquidGlassSupported = await LiquidGlassBackButton.isSupported();
+    if (_liquidGlassSupported) {
+      // Set up callback for back button taps
+      LiquidGlassBackButton.setOnBackButtonTappedCallback(() {
+        if (mounted) {
+          Navigator.of(context).pop();
+        }
+      });
+
+      // Show the back button
+      final shown = await LiquidGlassBackButton.show();
+
+      if (shown && mounted) {
+        setState(() {
+          _liquidGlassBackButtonShown = true;
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    // Hide liquid glass back button when leaving info screen
+    if (_liquidGlassBackButtonShown) {
+      LiquidGlassBackButton.hide();
+    }
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: const Color(0xFF121212),
       appBar: AppBar(
-        backgroundColor: Colors.black,
+        backgroundColor: const Color(0xFF121212),
         elevation: 0,
-        leading: IconButton(
+        leading: _liquidGlassSupported ? null : IconButton(
           icon: const Icon(Icons.chevron_left, color: Colors.white, size: 32),
           onPressed: () => Navigator.of(context).pop(),
         ),
+        automaticallyImplyLeading: !_liquidGlassSupported,
       ),
       body: const InfoScreen(),
     );

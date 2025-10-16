@@ -2,13 +2,13 @@ import 'dart:convert';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:dartssh2/dartssh2.dart' as dartssh2;
 import 'package:xterm/xterm.dart';
 import 'ssh.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:iconify_flutter/iconify_flutter.dart';
-import 'package:iconify_flutter/icons/material_symbols.dart';
+import 'liquid_glass_tab_bar.dart';
 
 // Terminal Tab Model
 class TerminalTab {
@@ -145,7 +145,7 @@ class TerminalTabsNotifier extends StateNotifier<TerminalTabsState> {
     }
 
     final tabId = DateTime.now().millisecondsSinceEpoch.toString();
-    final tabName = 'Terminal ${state.tabs.length + 1}';
+    final tabName = '${state.tabs.length + 1}';
     final terminal = Terminal();
     final service = TerminalService(_sshService, terminal);
 
@@ -286,7 +286,9 @@ class TerminalService {
 
 // Terminal Tab Bar Widget
 class TerminalTabBar extends ConsumerWidget {
-  const TerminalTabBar({super.key});
+  final bool hidePlusButton;
+  
+  const TerminalTabBar({super.key, this.hidePlusButton = false});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -317,26 +319,27 @@ class TerminalTabBar extends ConsumerWidget {
               ),
             ),
           ),
-          // New tab button
-          Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: tabsState.tabs.length < TerminalTabsNotifier.maxTabs
-                  ? () => tabsNotifier.createNewTab()
-                  : null,
-              child: SizedBox(
-                width: 40,
-                height: 40,
-                child: Icon(
-                  Icons.add,
-                  color: tabsState.tabs.length < TerminalTabsNotifier.maxTabs
-                      ? Colors.white
-                      : Colors.grey[600],
-                  size: 20,
+          // New tab button (hide if liquid glass is supported)
+          if (!hidePlusButton)
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: tabsState.tabs.length < TerminalTabsNotifier.maxTabs
+                    ? () => tabsNotifier.createNewTab()
+                    : null,
+                child: SizedBox(
+                  width: 40,
+                  height: 40,
+                  child: Icon(
+                    Icons.add,
+                    color: tabsState.tabs.length < TerminalTabsNotifier.maxTabs
+                        ? Colors.white
+                        : Colors.grey[600],
+                    size: 20,
+                  ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
@@ -409,23 +412,110 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
 
   // Track previous input for real-time sync
   String _previousInput = '';
+  
+  // Liquid glass state
+  bool _liquidGlassSupported = false;
+  bool _liquidGlassTabBarShown = false;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Listen for SSH reconnect and restore tabs
+    // Listen for SSH reconnect and restore/create tabs
     final sshService = ref.watch(sshServiceProvider);
     final tabsNotifier = ref.read(terminalTabsProvider.notifier);
+    
     if (sshService.isConnected) {
+      // Try to restore tabs first
       tabsNotifier._restoreTabsFromPrefs();
+      
+      // If still no tabs after a short delay, create one
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (mounted) {
+          final currentState = ref.read(terminalTabsProvider);
+          if (currentState.tabs.isEmpty && sshService.isConnected) {
+            debugPrint('TerminalScreen: Auto-creating first tab');
+            tabsNotifier.createNewTab();
+          }
+        }
+      });
     }
   }
 
   @override
   void initState() {
     super.initState();
+    // Add listener to text controller for real-time button updates
+    _terminalController.addListener(() {
+      setState(() {
+        // This will trigger a rebuild when text changes
+      });
+    });
     _terminalController.addListener(_handleInputChange);
     // Don't auto-focus on init - let user tap to show keyboard
+    
+    // Initialize liquid glass components
+    _initLiquidGlassComponents();
+  }
+  
+  Future<void> _initLiquidGlassComponents() async {
+    _liquidGlassSupported = await LiquidGlassTabBar.isSupported();
+    if (_liquidGlassSupported) {
+      // Initialize liquid glass tab bar (includes plus button)
+      await _initLiquidGlassTabBar();
+    }
+  }
+  
+  Future<void> _initLiquidGlassTabBar() async {
+    // Set up callbacks for tab bar
+    LiquidGlassTabBar.setCallbacks(
+      onTabSelected: (index) {
+        ref.read(terminalTabsProvider.notifier).switchToTab(index);
+      },
+      onTabClosed: (index) {
+        ref.read(terminalTabsProvider.notifier).closeTab(index);
+      },
+      onNewTab: () {
+        final tabsState = ref.read(terminalTabsProvider);
+        if (tabsState.tabs.length < TerminalTabsNotifier.maxTabs) {
+          ref.read(terminalTabsProvider.notifier).createNewTab();
+        }
+      },
+    );
+    
+    // Show the tab bar with current tabs
+    await _updateLiquidGlassTabBar();
+    
+    if (mounted) {
+      setState(() {
+        _liquidGlassTabBarShown = true;
+      });
+    }
+  }
+  
+  Future<void> _updateLiquidGlassTabBar() async {
+    if (!_liquidGlassSupported) return;
+    
+    final tabsState = ref.read(terminalTabsProvider);
+    final tabs = tabsState.tabs.map((tab) => {
+      'id': tab.id,
+      'name': tab.name,
+    }).toList();
+    
+    final canAddTab = tabsState.tabs.length < TerminalTabsNotifier.maxTabs;
+    
+    if (_liquidGlassTabBarShown) {
+      await LiquidGlassTabBar.updateTabs(
+        tabs: tabs,
+        activeIndex: tabsState.activeTabIndex,
+        canAddTab: canAddTab,
+      );
+    } else {
+      await LiquidGlassTabBar.show(
+        tabs: tabs,
+        activeIndex: tabsState.activeTabIndex,
+        canAddTab: canAddTab,
+      );
+    }
   }
 
   @override
@@ -433,6 +523,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     _terminalFocus.dispose();
     _terminalController.removeListener(_handleInputChange);
     _terminalController.dispose();
+    
+    // Hide liquid glass tab bar when leaving terminal screen
+    if (_liquidGlassTabBarShown) {
+      LiquidGlassTabBar.hide();
+    }
+    
     super.dispose();
   }
 
@@ -614,7 +710,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 2.0),
       child: Material(
-        color: color ?? Colors.grey[700],
+        color: color ?? Colors.grey[800],
         borderRadius: BorderRadius.circular(6),
         child: InkWell(
           borderRadius: BorderRadius.circular(6),
@@ -639,7 +735,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 2.0),
       child: Material(
-        color: Colors.grey[700],
+        color: Colors.grey[800],
         borderRadius: BorderRadius.circular(6),
         child: InkWell(
           borderRadius: BorderRadius.circular(6),
@@ -772,7 +868,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 2.0),
       child: Material(
-        color: Colors.grey[700],
+        color: Colors.grey[800],
         borderRadius: BorderRadius.circular(6),
         child: InkWell(
           borderRadius: BorderRadius.circular(6),
@@ -956,29 +1052,59 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     }
 
     if (activeTab == null) {
-      return const Center(
+      final sshService = ref.watch(sshServiceProvider);
+      final isConnected = sshService.isConnected;
+      
+      return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.terminal, size: 64, color: Colors.grey),
-            SizedBox(height: 16),
+            const Icon(Icons.terminal, size: 64, color: Colors.grey),
+            const SizedBox(height: 16),
             Text(
-              'No terminal tabs available',
-              style: TextStyle(color: Colors.grey, fontSize: 16),
+              isConnected 
+                ? 'No terminal tabs available'
+                : 'Connect to SSH first',
+              style: const TextStyle(color: Colors.grey, fontSize: 16),
             ),
+            const SizedBox(height: 24),
+            if (isConnected)
+              ElevatedButton.icon(
+                onPressed: () {
+                  ref.read(terminalTabsProvider.notifier).createNewTab();
+                },
+                icon: const Icon(Icons.add),
+                label: const Text('Create Terminal Tab'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.white.withValues(alpha:0.1),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                ),
+              ),
           ],
         ),
       );
     }
 
+    // Update liquid glass tab bar when tabs change
+    if (_liquidGlassTabBarShown) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _updateLiquidGlassTabBar();
+      });
+    }
+
     return Scaffold(
       backgroundColor: Colors.black,
-      resizeToAvoidBottomInset: isPortrait ? false : true,
+      resizeToAvoidBottomInset: true,
       body: SafeArea(
         child: Column(
           children: [
-            // Terminal tab bar
-            const TerminalTabBar(),
+            // Terminal tab bar (hide if liquid glass is supported)
+            if (!_liquidGlassSupported)
+              TerminalTabBar(hidePlusButton: _liquidGlassSupported),
+            
+            // Add spacing for liquid glass tab bar
+            if (_liquidGlassSupported) const SizedBox(height: 60),
 
             // Terminal area with single TextField overlay
             Expanded(
@@ -1030,13 +1156,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
               ),
             ),
 
-            // Terminal input bar
+            // Terminal input bar (bigger)
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 0),
+              padding: EdgeInsets.fromLTRB(0, 0, 0, 
+                _terminalFocus.hasFocus 
+                  ? 0 // No padding when keyboard is open (shortcuts will provide spacing)
+                  : 50  // Increased padding when keyboard is closed (to clear nav bar)
+              ),
               child: Container(
                 width: double.infinity,
                 color: Colors.black,
-                padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 12), // Increased padding
                 child: Row(
                   children: [
                     Expanded(
@@ -1045,37 +1175,38 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                         focusNode: _terminalFocus,
                         style: const TextStyle(
                           color: Colors.white,
-                          fontSize: 14,
+                          fontSize: 16, // Increased font size
                           fontFamily: 'monospace',
+                          fontWeight: FontWeight.w600,
                         ),
                         decoration: InputDecoration(
                           hintText: 'Type commands here...',
-                          hintStyle: const TextStyle(color: Colors.grey),
+                          hintStyle: const TextStyle(color: Colors.grey, fontSize: 16), // Increased hint size
                           filled: true,
                           fillColor: Colors.black,
                           contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 14, vertical: 10),
+                              horizontal: 16, vertical: 16), // Increased padding
                           border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
+                            borderRadius: BorderRadius.circular(25), // Fully rounded
                             borderSide: BorderSide(
                                 color: Colors.white.withAlpha(51), width: 1.2),
                           ),
                           enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
+                            borderRadius: BorderRadius.circular(25), // Fully rounded
                             borderSide: BorderSide(
                                 color: Colors.white.withAlpha(51), width: 1.2),
                           ),
                           focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
+                            borderRadius: BorderRadius.circular(25), // Fully rounded
                             borderSide: BorderSide(
                                 color: Colors.white.withAlpha(102),
                                 width: 1.8),
                           ),
                           prefixIcon: IconButton(
-                            icon: const Iconify(
-                              MaterialSymbols.keyboard_hide_outline_rounded,
+                            icon: const Icon(
+                              CupertinoIcons.keyboard_chevron_compact_down,
                               color: Colors.white,
-                              size: 20,
+                              size: 24, // Increased icon size
                             ),
                             onPressed: () {
                               debugPrint('DEBUG: Hide keyboard icon pressed');
@@ -1083,20 +1214,42 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                             },
                             splashRadius: 20,
                           ),
-                          suffixIcon: IconButton(
-                            icon: const Icon(Icons.send,
-                                color: Colors.white, size: 20),
-                            onPressed: () {
-                              final terminalService = activeTab.service;
-                              // Always send Enter (return key) regardless of input content
-                              terminalService.writeToShell('\r');
-                              // Clear input and reset previous input
-                              _terminalController.clear();
-                              _previousInput = '';
-                              // Hide keyboard for better UX
-                              _hideKeyboard();
-                            },
-                            splashRadius: 20,
+                          suffixIcon: Container(
+                            margin: const EdgeInsets.only(right: 8),
+                            width: 32, // Smaller button
+                            height: 32, // Smaller button
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: _terminalController.text.trim().isNotEmpty 
+                                    ? Colors.blue.withAlpha(204) // Highlight when text available
+                                    : Colors.white.withAlpha(51), // Dim when empty
+                                width: 1.5,
+                              ),
+                              color: _terminalController.text.trim().isNotEmpty 
+                                  ? Colors.blue.withAlpha(25) // Subtle background when text available
+                                  : Colors.transparent, // Transparent when empty
+                            ),
+                            child: IconButton(
+                              icon: Icon(
+                                CupertinoIcons.arrow_up,
+                                color: _terminalController.text.trim().isNotEmpty 
+                                    ? Colors.blue // Blue when text available
+                                    : Colors.white.withAlpha(102), // Dim when empty
+                                size: 18, // Bigger icon relative to button
+                              ),
+                              onPressed: _terminalController.text.trim().isNotEmpty ? () {
+                                final terminalService = activeTab.service;
+                                // Always send Enter (return key) regardless of input content
+                                terminalService.writeToShell('\r');
+                                // Clear input and reset previous input
+                                _terminalController.clear();
+                                _previousInput = '';
+                                // Hide keyboard for better UX
+                                _hideKeyboard();
+                              } : null, // Disabled when no text
+                              splashRadius: 16, // Smaller splash radius
+                            ),
                           ),
                         ),
                         onSubmitted: (value) {
@@ -1116,59 +1269,55 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
               ),
             ),
 
-            // Keyboard shortcuts row
-            Container(
-              height: isPortrait ? 40 : 50,
-              color: Colors.grey[900],
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 8.0),
-                child: Row(
-                  children: [
-                    // Control shortcuts first
-                    _buildShortcutButton('esc', '\x1b',
-                        onTap: () => _sendControlSequence('\x1b')),
+            // Keyboard shortcuts row (only show when keyboard is open)
+            if (_terminalFocus.hasFocus) ...[
+              Container(
+                height: isPortrait ? 40 : 50,
+                color: Colors.grey[900],
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                  child: Row(
+                    children: [
+                      // Control shortcuts first
+                      _buildShortcutButton('esc', '\x1b',
+                          onTap: () => _sendControlSequence('\x1b')),
 
-                    // Copy and Paste buttons
-                    _buildShortcutButton('cpy', '', onTap: () {
-                      debugPrint(
-                          'DEBUG: Copy button pressed - copying current input');
-                      _copyCurrentInput();
-                    }),
+                      // Copy and Paste buttons
+                      _buildShortcutButton('cpy', '', onTap: () {
+                        debugPrint(
+                            'DEBUG: Copy button pressed - copying current input');
+                        _copyCurrentInput();
+                      }),
 
-                    _buildShortcutButton('pste', '', onTap: () {
-                      debugPrint('DEBUG: Paste button pressed');
-                      _pasteFromClipboard();
-                    }),
+                      _buildShortcutButton('pste', '', onTap: () {
+                        debugPrint('DEBUG: Paste button pressed');
+                        _pasteFromClipboard();
+                      }),
 
-                    _buildCtrlButton('ctrl'),
+                      _buildCtrlButton('ctrl'),
 
-                    // Navigation shortcuts
-                    _buildShortcutButton('↑', '\x1b[A',
-                        onTap: () => _handleHistoryNavigation('\x1b[A')),
-                    _buildShortcutButton('↓', '\x1b[B',
-                        onTap: () => _handleHistoryNavigation('\x1b[B')),
-                    _buildShortcutButton('←', '\x1b[D',
-                        onTap: () => _sendControlSequence('\x1b[D')),
-                    _buildShortcutButton('→', '\x1b[C',
-                        onTap: () => _sendControlSequence('\x1b[C')),
-                    _buildShortcutButton('tab', '\t'),
+                      // Navigation shortcuts
+                      _buildShortcutButton('↑', '\x1b[A',
+                          onTap: () => _handleHistoryNavigation('\x1b[A')),
+                      _buildShortcutButton('↓', '\x1b[B',
+                          onTap: () => _handleHistoryNavigation('\x1b[B')),
+                      _buildShortcutButton('←', '\x1b[D',
+                          onTap: () => _sendControlSequence('\x1b[D')),
+                      _buildShortcutButton('→', '\x1b[C',
+                          onTap: () => _sendControlSequence('\x1b[C')),
+                      _buildShortcutButton('tab', '\t'),
 
-                    // Common symbols
-                    _buildShortcutButton('/', '/'),
-                    _buildShortcutButton('.', '.'),
-                    _buildShortcutButton('~', '~'),
-                    _buildShortcutButton('-', '-'),
-                    _buildShortcutButton('|', '|'),
-                    _buildShortcutButton(r'$', r'$'),
-                    _buildGitButton('git'),
-                    _buildServerButton('srvr'),
-                    _buildFlutterButton('fltr'),
-                    _buildBackupButton('bkup'),
-                  ],
+                      // Common symbols
+                      _buildGitButton('git'),
+                      _buildServerButton('srvr'),
+                      _buildFlutterButton('fltr'),
+                      _buildBackupButton('bkup'),
+                    ],
+                  ),
                 ),
               ),
-            ),
+            ],
           ],
         ),
       ),
@@ -1179,7 +1328,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 2.0),
       child: Material(
-        color: Colors.grey[700],
+        color: Colors.grey[800],
         borderRadius: BorderRadius.circular(6),
         child: InkWell(
           borderRadius: BorderRadius.circular(6),
@@ -1327,7 +1476,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 2.0),
       child: Material(
-        color: Colors.grey[700],
+        color: Colors.grey[800],
         borderRadius: BorderRadius.circular(6),
         child: InkWell(
           borderRadius: BorderRadius.circular(6),
@@ -1389,7 +1538,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 2.0),
       child: Material(
-        color: Colors.grey[700],
+        color: Colors.grey[800],
         borderRadius: BorderRadius.circular(6),
         child: InkWell(
           borderRadius: BorderRadius.circular(6),

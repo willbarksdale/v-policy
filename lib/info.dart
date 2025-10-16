@@ -16,80 +16,57 @@ class InfoScreen extends StatelessWidget {
     final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
     
     return Material(
-      color: Colors.black,
+      color: const Color(0xFF121212),
       child: SafeArea(
-        child: Column(
-          children: [
-            // Scrollable content
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                    // Welcome section
-                    _InfoSection(
-                    title: 'Welcome to v',
-                    content: 'This is a privacy-first, mobile IDE for coding & vibe coding on your own server via SSH.\n\nFeatures:\n• File explorer\n• Code editor\n• Terminal\n• Project management\n• No backend, no tracking.',
-                    isLandscape: isLandscape,
-                  ),
-                    
-                    SizedBox(height: isLandscape ? 32 : 48),
-                    
-                    // Getting Started section
-                    _InfoSection(
-                    title: 'Getting Started',
-                    content: '1. Set up & connect your SSH server\n2. Install AI if you want (Gemini CLI / Claude Code)\n3. Open a project folder and start coding!',
-                    isLandscape: isLandscape,
-                  ),
-                    
-                    SizedBox(height: isLandscape ? 32 : 48),
-                    
-                    // Tips section
-                    _InfoSection(
-                    title: 'Tips & Shortcuts',
-                    content: '• Use the file explorer to browse and edit files\n• Terminal tabs give you multiple shell sessions\n• Use the shortcut bar for common keys & commands\n• Recent projects are saved locally\n• All data stays on your device and server.',
-                      isLandscape: isLandscape,
-                    ),
-                    
-                    SizedBox(height: isLandscape ? 32 : 48),
-                    
-                    // Help section
-                    _InfoSection(
-                      title: 'Need Help?',
-                      content: '• For SSH issues, check your credentials and network\n• Each terminal tab is a separate shell session\n• For more info, view our policy links below',
-                      isLandscape: isLandscape,
-                    ),
-                    
-                    // Extra bottom spacing for footer
-                    const SizedBox(height: 100),
-                  ],
-                ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              // Welcome section
+              _InfoSection(
+                title: 'Welcome',
+                content: 'Terminal-based vibe coding on your own server. Connect via SSH, use CLI AI tools like Gemini CLI, Qwen CLI, or Claude Code to generate projects, and preview results—all from your phone.',
+                isLandscape: isLandscape,
               ),
-            ),
-            
-            // Fixed footer with policy links
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: const BoxDecoration(
-                color: Colors.black,
-                border: Border(
-                  top: BorderSide(color: Colors.white24, width: 1),
-                ),
+              
+              SizedBox(height: isLandscape ? 20 : 28),
+              
+              // Getting Started section
+              _InfoSection(
+                title: 'Getting Started',
+                content: '1. Connect to your SSH server\n2. Use AI CLI tools in terminal to generate code\n3. Preview your projects live\n4. Vibe code anywhere',
+                isLandscape: isLandscape,
               ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              
+              SizedBox(height: isLandscape ? 20 : 28),
+              
+              // Help section
+              _InfoSection(
+                title: 'Need Help?',
+                content: '• Check SSH credentials and network connection\n• Each terminal tab is a separate shell session\n• Install CLI AI tools on your server for best experience',
+                isLandscape: isLandscape,
+              ),
+              
+              const Spacer(),
+              
+              // Policy links
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   _PolicyLink(
                     title: 'Privacy',
                     onTap: () => _launchURL('https://willbarksdale.github.io/v-policy/privacy.html'),
                     isLandscape: isLandscape,
                   ),
+                  SizedBox(width: isLandscape ? 16 : 24),
                   _PolicyLink(
                     title: 'Terms',
                     onTap: () => _launchURL('https://willbarksdale.github.io/v-policy/terms.html'),
                     isLandscape: isLandscape,
                   ),
+                  SizedBox(width: isLandscape ? 16 : 24),
                   _PolicyLink(
                     title: 'Support',
                     onTap: () => _launchURL('https://willbarksdale.github.io/v-policy/support.html'),
@@ -97,8 +74,11 @@ class InfoScreen extends StatelessWidget {
                   ),
                 ],
               ),
-            ),
-          ],
+              
+              // Bottom spacing for nav menu
+              const SizedBox(height: 100),
+            ],
+          ),
         ),
       ),
     );
@@ -119,28 +99,29 @@ class _InfoSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            Text(
-              title,
-              style: TextStyle(
-                fontSize: isLandscape ? 22 : 26, 
-                fontWeight: FontWeight.bold, 
-                color: Colors.white
-              ),
-              textAlign: TextAlign.center,
-            ),
-            SizedBox(height: isLandscape ? 16 : 24),
-            Text(
-              content,
-              style: TextStyle(
-                fontSize: isLandscape ? 14 : 16, 
-                color: Colors.white70, 
-                height: 1.5
-              ),
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Text(
+          title,
+          style: TextStyle(
+            fontSize: isLandscape ? 20 : 22, 
+            fontWeight: FontWeight.bold, 
+            color: Colors.white
+          ),
+          textAlign: TextAlign.center,
+        ),
+        SizedBox(height: isLandscape ? 10 : 14),
+        Text(
+          content,
+          style: TextStyle(
+            fontSize: isLandscape ? 13 : 15, 
+            fontWeight: FontWeight.w700,
+            color: Colors.white70, 
+            height: 1.4
+          ),
           textAlign: TextAlign.left,
         ),
-          ],
+      ],
     );
   }
 }
@@ -167,10 +148,10 @@ class _PolicyLink extends StatelessWidget {
           vertical: isLandscape ? 6 : 8
         ),
         child: Text(
-              title,
-              style: TextStyle(
+          title,
+          style: TextStyle(
             fontSize: isLandscape ? 12 : 14,
-            fontWeight: FontWeight.w500,
+            fontWeight: FontWeight.w700,
             color: Colors.white70,
             decoration: TextDecoration.underline,
             decorationColor: Colors.white70,
@@ -180,4 +161,4 @@ class _PolicyLink extends StatelessWidget {
       ),
     );
   }
-} 
+}
