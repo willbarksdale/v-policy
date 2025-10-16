@@ -2,11 +2,10 @@ import UIKit
 import Flutter
 import SwiftUI
 
-// MARK: - Authentic iOS 26 Liquid Glass Power Button Overlay
+// MARK: - Authentic iOS 18 Liquid Glass Power Button Overlay
 
 // MARK: - Power Button State Observable
 
-@available(iOS 16.0, *)
 class PowerButtonState: ObservableObject {
     @Published var isConnected: Bool
     
@@ -17,7 +16,6 @@ class PowerButtonState: ObservableObject {
 
 // MARK: - Authentic SwiftUI Liquid Glass Power Button with Draggy Interactions
 
-@available(iOS 26.0, *)
 struct AuthenticLiquidGlassPowerButton: View {
     @ObservedObject var state: PowerButtonState
     let onPowerTapped: () -> Void
@@ -39,9 +37,8 @@ struct AuthenticLiquidGlassPowerButton: View {
     }
 }
 
-// MARK: - Simple iOS 26 Liquid Glass Power Button Plugin
+// MARK: - Simple iOS 18 Liquid Glass Power Button Plugin
 
-@available(iOS 16.0, *)
 class SimpleLiquidGlassPowerButtonPlugin: NSObject, FlutterPlugin {
     private var buttonState: PowerButtonState?
     private var hostingController: UIHostingController<AnyView>?
@@ -55,36 +52,23 @@ class SimpleLiquidGlassPowerButtonPlugin: NSObject, FlutterPlugin {
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
         case "isLiquidGlassSupported":
-            // Check if we're running on iOS 26+ with authentic Liquid Glass support
-            if #available(iOS 26.0, *) {
-                result(true)
-            } else {
-                result(false)
-            }
+            // iOS 18+ always supports Liquid Glass
+            result(true)
         case "enableNativeLiquidGlassPowerButton":
-            if #available(iOS 26.0, *) {
-                let args = call.arguments as? [String: Any]
-                let isConnected = args?["isConnected"] as? Bool ?? false
-                enableLiquidGlassForCurrentScreen(isConnected: isConnected, result: result)
-            } else {
-                result(false)
-            }
+            let args = call.arguments as? [String: Any]
+            let isConnected = args?["isConnected"] as? Bool ?? false
+            enableLiquidGlassForCurrentScreen(isConnected: isConnected, result: result)
         case "disableNativeLiquidGlassPowerButton":
             disableLiquidGlassForCurrentScreen(result: result)
         case "updatePowerButtonState":
-            if #available(iOS 26.0, *) {
-                let args = call.arguments as? [String: Any]
-                let isConnected = args?["isConnected"] as? Bool ?? false
-                updatePowerButtonState(isConnected: isConnected, result: result)
-            } else {
-                result(false)
-            }
+            let args = call.arguments as? [String: Any]
+            let isConnected = args?["isConnected"] as? Bool ?? false
+            updatePowerButtonState(isConnected: isConnected, result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
     }
     
-    @available(iOS 26.0, *)
     private func enableLiquidGlassForCurrentScreen(isConnected: Bool, result: @escaping FlutterResult) {
         DispatchQueue.main.async {
             guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
@@ -138,7 +122,6 @@ class SimpleLiquidGlassPowerButtonPlugin: NSObject, FlutterPlugin {
         }
     }
     
-    @available(iOS 26.0, *)
     private func updatePowerButtonState(isConnected: Bool, result: @escaping FlutterResult) {
         DispatchQueue.main.async {
             // Simply update the observable state - SwiftUI will handle the UI update

@@ -5,14 +5,9 @@ import 'package:flutter/material.dart';
 class LiquidGlassBackButton {
   static const MethodChannel _channel = MethodChannel('liquid_glass_back_button');
   
+  /// iOS 26+ always supports Liquid Glass
   static Future<bool> isSupported() async {
-    try {
-      final bool? result = await _channel.invokeMethod('isLiquidGlassSupported');
-      return result ?? false;
-    } catch (e) {
-      debugPrint('Error checking liquid glass support: $e');
-      return false;
-    }
+    return true;
   }
   
   static Future<bool> show() async {

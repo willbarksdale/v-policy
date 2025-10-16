@@ -2,11 +2,10 @@ import UIKit
 import Flutter
 import SwiftUI
 
-// MARK: - Authentic iOS 26 Liquid Glass Play Button Overlay
+// MARK: - Authentic iOS 18 Liquid Glass Play Button Overlay
 
 // MARK: - Authentic SwiftUI Liquid Glass Play Button with Draggy Interactions
 
-@available(iOS 26.0, *)
 struct AuthenticLiquidGlassPlayButton: View {
     let isLoading: Bool
     let onPlayTapped: () -> Void
@@ -35,9 +34,8 @@ struct AuthenticLiquidGlassPlayButton: View {
     }
 }
 
-// MARK: - Simple iOS 26 Liquid Glass Play Button Plugin
+// MARK: - Simple iOS 18 Liquid Glass Play Button Plugin
 
-@available(iOS 16.0, *)
 class SimpleLiquidGlassPlayButtonPlugin: NSObject, FlutterPlugin {
     private var buttonState: PlayButtonState?
     private var hostingController: UIHostingController<AnyView>?
@@ -51,36 +49,24 @@ class SimpleLiquidGlassPlayButtonPlugin: NSObject, FlutterPlugin {
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
         case "isLiquidGlassSupported":
-            // Check if we're running on iOS 26+ with authentic Liquid Glass support
-            if #available(iOS 26.0, *) {
-                result(true)
-            } else {
-                result(false)
-            }
+            // Check if we're running on iOS 18+ with authentic Liquid Glass support
+            result(true)
         case "enableNativeLiquidGlassPlayButton":
-            if #available(iOS 26.0, *) {
-                let args = call.arguments as? [String: Any]
+            let args = call.arguments as? [String: Any]
                 let isLoading = args?["isLoading"] as? Bool ?? false
                 enableLiquidGlassForCurrentScreen(isLoading: isLoading, result: result)
-            } else {
-                result(false)
-            }
         case "disableNativeLiquidGlassPlayButton":
             disableLiquidGlassForCurrentScreen(result: result)
         case "updatePlayButtonState":
-            if #available(iOS 26.0, *) {
-                let args = call.arguments as? [String: Any]
+            let args = call.arguments as? [String: Any]
                 let isLoading = args?["isLoading"] as? Bool ?? false
                 updatePlayButtonState(isLoading: isLoading, result: result)
-            } else {
-                result(false)
-            }
+            
         default:
             result(FlutterMethodNotImplemented)
         }
     }
     
-    @available(iOS 26.0, *)
     private func enableLiquidGlassForCurrentScreen(isLoading: Bool, result: @escaping FlutterResult) {
         DispatchQueue.main.async {
             guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
@@ -134,7 +120,6 @@ class SimpleLiquidGlassPlayButtonPlugin: NSObject, FlutterPlugin {
         }
     }
     
-    @available(iOS 26.0, *)
     private func updatePlayButtonState(isLoading: Bool, result: @escaping FlutterResult) {
         DispatchQueue.main.async {
             // Simply update the observable state - SwiftUI will handle the UI update
@@ -173,7 +158,6 @@ class SimpleLiquidGlassPlayButtonPlugin: NSObject, FlutterPlugin {
 
 // MARK: - Play Button State Observable
 
-@available(iOS 16.0, *)
 class PlayButtonState: ObservableObject {
     @Published var isLoading: Bool
     

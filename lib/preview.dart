@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:webview_flutter/webview_flutter.dart' as wv;
 import 'dart:async';
 import 'ssh.dart';
 import 'liquid_glass_play_button.dart';
+import 'liquid_glass_nav.dart';
 
 // Preview settings provider
 final previewUrlProvider = StateProvider<String?>((ref) => null);
@@ -184,6 +186,12 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       
       ref.read(previewUrlProvider.notifier).state = url;
       setState(() => _errorMessage = null);
+      
+      // Hide Liquid Glass elements when preview becomes active
+      if (_liquidGlassPlayButtonShown) {
+        await LiquidGlassPlayButton.hide();
+      }
+      await LiquidGlassNav.hide();
     } catch (e) {
       setState(() => _errorMessage = 'Error checking server: $e');
     } finally {
@@ -198,16 +206,27 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     }
   }
 
-  void _stopPreview() {
+  void _stopPreview() async {
     ref.read(previewUrlProvider.notifier).state = null;
     setState(() => _errorMessage = null);
     
+    // Show Liquid Glass elements again when preview stops
+    if (_liquidGlassPlayButtonShown) {
+      await LiquidGlassPlayButton.show(isLoading: false);
+    }
+    await LiquidGlassNav.show();
+    
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Preview stopped', style: TextStyle(color: Colors.white)),
+        SnackBar(
+          content: const Text('Preview stopped', style: TextStyle(color: Colors.white)),
           backgroundColor: Colors.black,
           behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.only(
+            bottom: MediaQuery.of(context).size.height - 200,
+            left: 20,
+            right: 20,
+          ),
         ),
       );
     }
@@ -221,53 +240,31 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     final sshService = ref.watch(sshServiceProvider);
 
     return Scaffold(
-      backgroundColor: const Color(0xFF121212),
-      body: Column(
-        children: [
-          // Header with wifi status only
-          Container(
-            padding: EdgeInsets.only(
-              top: MediaQuery.of(context).padding.top + 8,
-              left: 16,
-              right: 16,
-              bottom: 8,
-            ),
-            decoration: const BoxDecoration(
-              color: Colors.black,
-            ),
-            child: Row(
-              children: [
-                const Spacer(),
-              ],
-            ),
-          ),
-          
-          // Preview content
-          Expanded(
-            child: _buildPreviewContent(previewUrl, sshService.isConnected),
-          ),
-        ],
-      ),
+      backgroundColor: const Color(0xFF0a0a0a),
+      body: _buildPreviewContent(previewUrl, sshService.isConnected),
     );
   }
 
   Widget _buildPreviewContent(String? previewUrl, bool isConnected) {
     if (!isConnected) {
-      return const Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              'Connect to your server to use preview',
-              style: TextStyle(color: Colors.grey, fontSize: 16),
-            ),
-          ],
+      return const SafeArea(
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                'Connect to your server to use preview',
+                style: TextStyle(color: Colors.grey, fontSize: 16),
+              ),
+            ],
+          ),
         ),
       );
     }
 
     if (previewUrl == null) {
-      return Center(
+      return SafeArea(
+        child: Center(
         child: Padding(
           padding: const EdgeInsets.all(24.0),
           child: Column(
@@ -359,11 +356,11 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
               
               // Instructions with consistent spacing like info screen
               const Text(
-                '1. Start your dev server in Terminal\n   2. Enter port number or URL\n3. Tap play & view your UI live!',
+                '1. Use "srvr" button to start web server\n2. Enter port (default 3000) or custom URL\n3. Tap play to preview your web app!\n\nWorks with: React, Vue, Next.js, Vite, static sites',
                 style: TextStyle(
                   color: Colors.grey, 
                   fontWeight: FontWeight.w700,
-                  fontSize: 14,
+                  fontSize: 13,
                   height: 1.5,
                 ),
                 textAlign: TextAlign.center,
@@ -398,6 +395,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
             ],
           ),
         ),
+        ),
       );
     }
 
@@ -424,6 +422,13 @@ class _PreviewWebViewState extends State<PreviewWebView> {
   @override
   void initState() {
     super.initState();
+    
+    // Use edge-to-edge mode (status bar visible but translucent)
+    SystemChrome.setEnabledSystemUIMode(
+      SystemUiMode.edgeToEdge,
+      overlays: [],
+    );
+    
     _controller = wv.WebViewController()
       ..setJavaScriptMode(wv.JavaScriptMode.unrestricted)
       ..setBackgroundColor(Colors.black)
@@ -463,24 +468,74 @@ class _PreviewWebViewState extends State<PreviewWebView> {
     
     _controller.loadRequest(Uri.parse(widget.url));
   }
+  
+  @override
+  void dispose() {
+    // Restore status bar when leaving preview
+    SystemChrome.setEnabledSystemUIMode(
+      SystemUiMode.edgeToEdge,
+      overlays: SystemUiOverlay.values,
+    );
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Column(
       children: [
-        // URL bar
+        // WebView or Error
+        Expanded(
+          child: _loadError != null
+              ? SafeArea(
+                  child: Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.error_outline, size: 64, color: Colors.red),
+                        const SizedBox(height: 16),
+                        Text(
+                          _loadError!,
+                          style: const TextStyle(color: Colors.red, fontSize: 14),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 16),
+                        ElevatedButton(
+                          onPressed: () {
+                            setState(() {
+                              _isLoading = true;
+                              _loadError = null;
+                            });
+                            _controller.reload();
+                          },
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : SafeArea(
+                  bottom: false, // Allow bottom bar to extend to edge
+                  child: wv.WebViewWidget(controller: _controller),
+                ),
+        ),
+        // URL bar at bottom
         Container(
-          padding: const EdgeInsets.only(left: 6, right: 6, top: 0, bottom: 0.5),
+          padding: const EdgeInsets.only(
+            left: 20,
+            right: 6,
+            top: 4,
+            bottom: 4,
+          ),
           decoration: const BoxDecoration(
             color: Colors.black,
             border: Border(
-              bottom: BorderSide(color: Colors.white24, width: 1),
+              top: BorderSide(color: Colors.white24, width: 1),
             ),
           ),
           child: Row(
             children: [
               const Icon(Icons.link, size: 14, color: Colors.grey),
-              const SizedBox(width: 4),
+              const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   widget.url,
@@ -488,16 +543,47 @@ class _PreviewWebViewState extends State<PreviewWebView> {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              if (_isLoading)
-                const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 1.2),
-                )
-              else
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
+              const SizedBox(width: 4),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_isLoading) ...[
+                    const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 1.2),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 14, color: Colors.white),
+                      onPressed: widget.onStop,
+                      tooltip: 'Cancel',
+                      padding: const EdgeInsets.all(0.5),
+                      constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                    ),
+                  ] else ...[
+                    IconButton(
+                      icon: const Icon(Icons.arrow_back, size: 14, color: Colors.white),
+                      onPressed: () async {
+                        if (await _controller.canGoBack()) {
+                          _controller.goBack();
+                        }
+                      },
+                      tooltip: 'Back',
+                      padding: const EdgeInsets.all(0.5),
+                      constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.arrow_forward, size: 14, color: Colors.white),
+                      onPressed: () async {
+                        if (await _controller.canGoForward()) {
+                          _controller.goForward();
+                        }
+                      },
+                      tooltip: 'Forward',
+                      padding: const EdgeInsets.all(0.5),
+                      constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                    ),
                     IconButton(
                       icon: const Icon(Icons.refresh, size: 14, color: Colors.white),
                       onPressed: () {
@@ -519,39 +605,10 @@ class _PreviewWebViewState extends State<PreviewWebView> {
                       constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
                     ),
                   ],
-                ),
+                ],
+              ),
             ],
           ),
-        ),
-        // WebView or Error
-        Expanded(
-          child: _loadError != null
-              ? Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Icon(Icons.error_outline, size: 64, color: Colors.red),
-                      const SizedBox(height: 16),
-                      Text(
-                        _loadError!,
-                        style: const TextStyle(color: Colors.red, fontSize: 14),
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 16),
-                      ElevatedButton(
-                        onPressed: () {
-                          setState(() {
-                            _isLoading = true;
-                            _loadError = null;
-                          });
-                          _controller.reload();
-                        },
-                        child: const Text('Retry'),
-                      ),
-                    ],
-                  ),
-                )
-              : wv.WebViewWidget(controller: _controller),
         ),
       ],
     );

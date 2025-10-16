@@ -48,7 +48,7 @@ No desktop IDE needed. Just SSH, terminal, AI CLI tools, and preview.
 - iOS 26 Liquid Glass native navigation
 - Sleek dark theme optimized for coding
 - Touch-friendly interface built for mobile
-- Responsive in portrait and landscape
+- Portrait-optimized mobile experience
 
 ---
 
@@ -64,8 +64,8 @@ No desktop IDE needed. Just SSH, terminal, AI CLI tools, and preview.
 
 ## Requirements
 
-- **iOS 18.0 or later**
-- iPhone or iPad
+- **iOS 26.0 or later**
+- iPhone (portrait mode only)
 - SSH server with your AI CLI tools installed
 
 ---

@@ -13,10 +13,8 @@ class InfoScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
-    
     return Material(
-      color: const Color(0xFF121212),
+      color: const Color(0xFF0a0a0a),
       child: SafeArea(
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
@@ -25,28 +23,25 @@ class InfoScreen extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               // Welcome section
-              _InfoSection(
+              const _InfoSection(
                 title: 'Welcome',
                 content: 'Terminal-based vibe coding on your own server. Connect via SSH, use CLI AI tools like Gemini CLI, Qwen CLI, or Claude Code to generate projects, and preview results—all from your phone.',
-                isLandscape: isLandscape,
               ),
               
-              SizedBox(height: isLandscape ? 20 : 28),
+              const SizedBox(height: 28),
               
               // Getting Started section
-              _InfoSection(
+              const _InfoSection(
                 title: 'Getting Started',
-                content: '1. Connect to your SSH server\n2. Use AI CLI tools in terminal to generate code\n3. Preview your projects live\n4. Vibe code anywhere',
-                isLandscape: isLandscape,
+                content: '1. Connect to your SSH server\n2. Use AI CLI tools in terminal to code\n3. Start web server with "srvr" button\n4. Preview web apps live',
               ),
               
-              SizedBox(height: isLandscape ? 20 : 28),
+              const SizedBox(height: 28),
               
               // Help section
-              _InfoSection(
+              const _InfoSection(
                 title: 'Need Help?',
                 content: '• Check SSH credentials and network connection\n• Each terminal tab is a separate shell session\n• Install CLI AI tools on your server for best experience',
-                isLandscape: isLandscape,
               ),
               
               const Spacer(),
@@ -58,19 +53,16 @@ class InfoScreen extends StatelessWidget {
                   _PolicyLink(
                     title: 'Privacy',
                     onTap: () => _launchURL('https://willbarksdale.github.io/v-policy/privacy.html'),
-                    isLandscape: isLandscape,
                   ),
-                  SizedBox(width: isLandscape ? 16 : 24),
+                  const SizedBox(width: 24),
                   _PolicyLink(
                     title: 'Terms',
                     onTap: () => _launchURL('https://willbarksdale.github.io/v-policy/terms.html'),
-                    isLandscape: isLandscape,
                   ),
-                  SizedBox(width: isLandscape ? 16 : 24),
+                  const SizedBox(width: 24),
                   _PolicyLink(
                     title: 'Support',
                     onTap: () => _launchURL('https://willbarksdale.github.io/v-policy/support.html'),
-                    isLandscape: isLandscape,
                   ),
                 ],
               ),
@@ -88,12 +80,10 @@ class InfoScreen extends StatelessWidget {
 class _InfoSection extends StatelessWidget {
   final String title;
   final String content;
-  final bool isLandscape;
   
   const _InfoSection({
     required this.title, 
-    required this.content, 
-    required this.isLandscape
+    required this.content,
   });
 
   @override
@@ -103,18 +93,18 @@ class _InfoSection extends StatelessWidget {
       children: [
         Text(
           title,
-          style: TextStyle(
-            fontSize: isLandscape ? 20 : 22, 
+          style: const TextStyle(
+            fontSize: 22, 
             fontWeight: FontWeight.bold, 
             color: Colors.white
           ),
           textAlign: TextAlign.center,
         ),
-        SizedBox(height: isLandscape ? 10 : 14),
+        const SizedBox(height: 14),
         Text(
           content,
-          style: TextStyle(
-            fontSize: isLandscape ? 13 : 15, 
+          style: const TextStyle(
+            fontSize: 15, 
             fontWeight: FontWeight.w700,
             color: Colors.white70, 
             height: 1.4
@@ -129,12 +119,10 @@ class _InfoSection extends StatelessWidget {
 class _PolicyLink extends StatelessWidget {
   final String title;
   final VoidCallback onTap;
-  final bool isLandscape;
 
   const _PolicyLink({
     required this.title,
     required this.onTap,
-    required this.isLandscape,
   });
 
   @override
@@ -143,14 +131,14 @@ class _PolicyLink extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(4),
       child: Padding(
-        padding: EdgeInsets.symmetric(
-          horizontal: isLandscape ? 8 : 12, 
-          vertical: isLandscape ? 6 : 8
+        padding: const EdgeInsets.symmetric(
+          horizontal: 12, 
+          vertical: 8
         ),
         child: Text(
           title,
-          style: TextStyle(
-            fontSize: isLandscape ? 12 : 14,
+          style: const TextStyle(
+            fontSize: 14,
             fontWeight: FontWeight.w700,
             color: Colors.white70,
             decoration: TextDecoration.underline,

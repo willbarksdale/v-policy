@@ -674,7 +674,7 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
   late final TextEditingController _passwordController;
   late final TextEditingController _privateKeyController;
   late final TextEditingController _privateKeyPassphraseController;
-  bool _liquidGlassSupported = false;
+  bool? _liquidGlassSupported; // null until checked
   bool _liquidGlassPowerButtonShown = false;
   bool _liquidGlassInfoButtonShown = false;
 
@@ -694,8 +694,12 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
   }
   
   Future<void> _initLiquidGlassButtons() async {
-    _liquidGlassSupported = await LiquidGlassPowerButton.isSupported();
-    if (_liquidGlassSupported) {
+    final supported = await LiquidGlassPowerButton.isSupported();
+    setState(() {
+      _liquidGlassSupported = supported;
+    });
+    
+    if (supported) {
       // Initialize power button
       await _initLiquidGlassPowerButton();
       
@@ -738,7 +742,7 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
         );
         
         // Show buttons again when returning
-        if (mounted && _liquidGlassSupported) {
+        if (mounted && _liquidGlassSupported == true) {
           final currentSshService = ref.read(sshServiceProvider);
           await LiquidGlassPowerButton.show(isConnected: currentSshService.isConnected);
           await LiquidGlassInfoButton.show();
@@ -837,10 +841,15 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
             );
 
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Connected!', style: TextStyle(color: Colors.white)),
+          SnackBar(
+            content: const Text('Connected!', style: TextStyle(color: Colors.white)),
             backgroundColor: Colors.black,
             behavior: SnackBarBehavior.floating,
+            margin: EdgeInsets.only(
+              bottom: MediaQuery.of(context).size.height - 200,
+              left: 20,
+              right: 20,
+            ),
           ),
         );
         ref.read(connectedIpProvider.notifier).state = _ipController.text;
@@ -877,6 +886,11 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
             backgroundColor: Colors.red.withAlpha(200),
             behavior: SnackBarBehavior.floating,
             duration: const Duration(seconds: 5),
+            margin: EdgeInsets.only(
+              bottom: MediaQuery.of(context).size.height - 200,
+              left: 20,
+              right: 20,
+            ),
           ),
         );
       } finally {
@@ -904,10 +918,15 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
       }
       
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Session ended', style: TextStyle(color: Colors.white)),
+        SnackBar(
+          content: const Text('Session ended', style: TextStyle(color: Colors.white)),
           backgroundColor: Colors.black,
           behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.only(
+            bottom: MediaQuery.of(context).size.height - 200,
+            left: 20,
+            right: 20,
+          ),
         ),
       );
     } catch (e) {
@@ -916,6 +935,11 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
           content: Text('Failed to disconnect: $e', style: const TextStyle(color: Colors.white)),
           backgroundColor: Colors.black,
           behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.only(
+            bottom: MediaQuery.of(context).size.height - 200,
+            left: 20,
+            right: 20,
+          ),
         ),
       );
     }
@@ -926,9 +950,9 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
     final isPasswordVisible = ref.watch(sshPasswordVisibleProvider);
 
     return Scaffold(
-      backgroundColor: const Color(0xFF121212),
+      backgroundColor: const Color(0xFF0a0a0a),
       appBar: AppBar(
-        backgroundColor: const Color(0xFF121212),
+        backgroundColor: const Color(0xFF0a0a0a),
         elevation: 0,
         centerTitle: true,
       ),
@@ -972,7 +996,7 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                               decoration: InputDecoration(
                               labelText: 'Server IP',
                               labelStyle: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w700, fontSize: 16),
-                              suffixIcon: _liquidGlassSupported ? null : Consumer(
+                              suffixIcon: _liquidGlassSupported == false ? Consumer(
                                 builder: (context, ref, child) {
                                   final currentSshService = ref.watch(sshServiceProvider);
                                   final currentIsLoading = ref.watch(sshIsLoadingProvider);
@@ -1032,7 +1056,7 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                                       ),
                                     );
                                 },
-                              ),
+                              ) : null,
                               border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
                                 borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
@@ -1061,7 +1085,7 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                             decoration: InputDecoration(
                               labelText: 'Port',
                               labelStyle: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w700, fontSize: 16),
-                              suffixIcon: _liquidGlassSupported ? null : IconButton(
+                              suffixIcon: _liquidGlassSupported == false ? IconButton(
                                 icon: const Icon(CupertinoIcons.info, size: 20, color: Colors.white70),
                                 onPressed: () async {
                                   await Navigator.of(context).push(
@@ -1070,7 +1094,7 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                                     ),
                                   );
                                 },
-                              ),
+                              ) : null,
                               border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
                                 borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
@@ -1454,7 +1478,7 @@ class InfoScreenFullPage extends StatefulWidget {
 }
 
 class _InfoScreenFullPageState extends State<InfoScreenFullPage> {
-  bool _liquidGlassSupported = false;
+  bool? _liquidGlassSupported; // null until checked
   bool _liquidGlassBackButtonShown = false;
 
   @override
@@ -1464,8 +1488,12 @@ class _InfoScreenFullPageState extends State<InfoScreenFullPage> {
   }
 
   Future<void> _initLiquidGlassBackButton() async {
-    _liquidGlassSupported = await LiquidGlassBackButton.isSupported();
-    if (_liquidGlassSupported) {
+    final supported = await LiquidGlassBackButton.isSupported();
+    setState(() {
+      _liquidGlassSupported = supported;
+    });
+    
+    if (supported) {
       // Set up callback for back button taps
       LiquidGlassBackButton.setOnBackButtonTappedCallback(() {
         if (mounted) {
@@ -1496,15 +1524,15 @@ class _InfoScreenFullPageState extends State<InfoScreenFullPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF121212),
+      backgroundColor: const Color(0xFF0a0a0a),
       appBar: AppBar(
-        backgroundColor: const Color(0xFF121212),
+        backgroundColor: const Color(0xFF0a0a0a),
         elevation: 0,
-        leading: _liquidGlassSupported ? null : IconButton(
+        leading: _liquidGlassSupported == false ? IconButton(
           icon: const Icon(Icons.chevron_left, color: Colors.white, size: 32),
           onPressed: () => Navigator.of(context).pop(),
-        ),
-        automaticallyImplyLeading: !_liquidGlassSupported,
+        ) : null,
+        automaticallyImplyLeading: _liquidGlassSupported == false,
       ),
       body: const InfoScreen(),
     );

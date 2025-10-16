@@ -2,11 +2,10 @@ import UIKit
 import Flutter
 import SwiftUI
 
-// MARK: - Authentic iOS 26 Liquid Glass Back Button Overlay
+// MARK: - Authentic iOS 18 Liquid Glass Back Button Overlay
 
 // MARK: - Authentic SwiftUI Liquid Glass Back Button with Draggy Interactions
 
-@available(iOS 26.0, *)
 struct AuthenticLiquidGlassBackButton: View {
     let onBackTapped: () -> Void
     @Namespace private var namespace
@@ -27,9 +26,8 @@ struct AuthenticLiquidGlassBackButton: View {
     }
 }
 
-// MARK: - Simple iOS 26 Liquid Glass Back Button Plugin
+// MARK: - Simple iOS 18 Liquid Glass Back Button Plugin
 
-@available(iOS 16.0, *)
 class SimpleLiquidGlassBackButtonPlugin: NSObject, FlutterPlugin {
     private var hostingController: UIHostingController<AnyView>?
     
@@ -42,18 +40,10 @@ class SimpleLiquidGlassBackButtonPlugin: NSObject, FlutterPlugin {
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
         case "isLiquidGlassSupported":
-            // Check if we're running on iOS 26+ with authentic Liquid Glass support
-            if #available(iOS 26.0, *) {
-                result(true)
-            } else {
-                result(false)
-            }
+            // Check if we're running on iOS 18+ with authentic Liquid Glass support
+            result(true)
         case "enableNativeLiquidGlassBackButton":
-            if #available(iOS 26.0, *) {
-                enableLiquidGlassForCurrentScreen(result: result)
-            } else {
-                result(false)
-            }
+            enableLiquidGlassForCurrentScreen(result: result)
         case "disableNativeLiquidGlassBackButton":
             disableLiquidGlassForCurrentScreen(result: result)
         default:
@@ -61,7 +51,6 @@ class SimpleLiquidGlassBackButtonPlugin: NSObject, FlutterPlugin {
         }
     }
     
-    @available(iOS 26.0, *)
     private func enableLiquidGlassForCurrentScreen(result: @escaping FlutterResult) {
         DispatchQueue.main.async {
             guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,

@@ -2,9 +2,8 @@ import UIKit
 import Flutter
 import SwiftUI
 
-// MARK: - iOS 26 Liquid Glass Terminal Tab Bar
+// MARK: - iOS 18 Liquid Glass Terminal Tab Bar
 
-@available(iOS 26.0, *)
 struct LiquidGlassTerminalTabBar: View {
     let tabs: [TerminalTabInfo]
     let activeIndex: Int
@@ -94,7 +93,6 @@ struct TerminalTabInfo: Identifiable {
 
 // MARK: - Liquid Glass Tab Bar Plugin
 
-@available(iOS 16.0, *)
 class LiquidGlassTabBarPlugin: NSObject, FlutterPlugin {
     private var hostingController: UIHostingController<AnyView>?
     private var currentTabs: [TerminalTabInfo] = []
@@ -109,39 +107,27 @@ class LiquidGlassTabBarPlugin: NSObject, FlutterPlugin {
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
         case "isLiquidGlassSupported":
-            if #available(iOS 26.0, *) {
-                result(true)
-            } else {
-                result(false)
-            }
+            result(true)
         case "showLiquidGlassTabBar":
-            if #available(iOS 26.0, *) {
-                let args = call.arguments as? [String: Any]
+            let args = call.arguments as? [String: Any]
                 let tabsData = args?["tabs"] as? [[String: String]] ?? []
                 let activeIndex = args?["activeIndex"] as? Int ?? 0
                 let canAddTab = args?["canAddTab"] as? Bool ?? true
                 showTabBar(tabsData: tabsData, activeIndex: activeIndex, canAddTab: canAddTab, result: result)
-            } else {
-                result(false)
-            }
         case "hideLiquidGlassTabBar":
             hideTabBar(result: result)
         case "updateTabs":
-            if #available(iOS 26.0, *) {
-                let args = call.arguments as? [String: Any]
+            let args = call.arguments as? [String: Any]
                 let tabsData = args?["tabs"] as? [[String: String]] ?? []
                 let activeIndex = args?["activeIndex"] as? Int ?? 0
                 let canAddTab = args?["canAddTab"] as? Bool ?? true
                 updateTabs(tabsData: tabsData, activeIndex: activeIndex, canAddTab: canAddTab, result: result)
-            } else {
-                result(false)
-            }
+            
         default:
             result(FlutterMethodNotImplemented)
         }
     }
     
-    @available(iOS 26.0, *)
     private func showTabBar(tabsData: [[String: String]], activeIndex: Int, canAddTab: Bool, result: @escaping FlutterResult) {
         DispatchQueue.main.async {
             guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
@@ -204,7 +190,6 @@ class LiquidGlassTabBarPlugin: NSObject, FlutterPlugin {
         }
     }
     
-    @available(iOS 26.0, *)
     private func updateTabs(tabsData: [[String: String]], activeIndex: Int, canAddTab: Bool, result: @escaping FlutterResult) {
         DispatchQueue.main.async {
             guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,

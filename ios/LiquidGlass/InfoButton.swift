@@ -2,11 +2,10 @@ import UIKit
 import Flutter
 import SwiftUI
 
-// MARK: - Authentic iOS 26 Liquid Glass Info Button Overlay
+// MARK: - Authentic iOS 18 Liquid Glass Info Button Overlay
 
 // MARK: - Authentic SwiftUI Liquid Glass Info Button with Draggy Interactions
 
-@available(iOS 26.0, *)
 struct AuthenticLiquidGlassInfoButton: View {
     let onInfoTapped: () -> Void
     @Namespace private var namespace
@@ -27,9 +26,8 @@ struct AuthenticLiquidGlassInfoButton: View {
     }
 }
 
-// MARK: - Simple iOS 26 Liquid Glass Info Button Plugin
+// MARK: - Simple iOS 18 Liquid Glass Info Button Plugin
 
-@available(iOS 16.0, *)
 class SimpleLiquidGlassInfoButtonPlugin: NSObject, FlutterPlugin {
     private var hostingController: UIHostingController<AnyView>?
     
@@ -42,18 +40,10 @@ class SimpleLiquidGlassInfoButtonPlugin: NSObject, FlutterPlugin {
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
         case "isLiquidGlassSupported":
-            // Check if we're running on iOS 26+ with authentic Liquid Glass support
-            if #available(iOS 26.0, *) {
-                result(true)
-            } else {
-                result(false)
-            }
+            // iOS 18+ always supports Liquid Glass
+            result(true)
         case "enableNativeLiquidGlassInfoButton":
-            if #available(iOS 26.0, *) {
-                enableLiquidGlassForCurrentScreen(result: result)
-            } else {
-                result(false)
-            }
+            enableLiquidGlassForCurrentScreen(result: result)
         case "disableNativeLiquidGlassInfoButton":
             disableLiquidGlassForCurrentScreen(result: result)
         default:
@@ -61,7 +51,6 @@ class SimpleLiquidGlassInfoButtonPlugin: NSObject, FlutterPlugin {
         }
     }
     
-    @available(iOS 26.0, *)
     private func enableLiquidGlassForCurrentScreen(result: @escaping FlutterResult) {
         DispatchQueue.main.async {
             guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,

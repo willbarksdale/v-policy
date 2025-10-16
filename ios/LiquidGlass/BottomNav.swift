@@ -2,9 +2,8 @@ import UIKit
 import Flutter
 import SwiftUI
 
-// MARK: - iOS 26 Liquid Glass Bottom Navigation for V-Policy
+// MARK: - iOS 18 Liquid Glass Bottom Navigation for V-Policy
 
-@available(iOS 16.0, *)
 class VPolicyLiquidGlassNavPlugin: NSObject, FlutterPlugin {
     private var tabBarOverlay: VPolicyNativeTabBar?
     private weak var registrar: FlutterPluginRegistrar?
@@ -19,17 +18,9 @@ class VPolicyLiquidGlassNavPlugin: NSObject, FlutterPlugin {
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
         case "isLiquidGlassSupported":
-            if #available(iOS 26.0, *) {
-                result(true)
-            } else {
-                result(false)
-            }
+            result(true)
         case "showLiquidGlassNav":
-            if #available(iOS 26.0, *) {
-                showLiquidGlassNav(result: result)
-            } else {
-                result(false)
-            }
+            showLiquidGlassNav(result: result)
         case "hideLiquidGlassNav":
             hideLiquidGlassNav(result: result)
         case "setSelectedTab":
@@ -43,7 +34,6 @@ class VPolicyLiquidGlassNavPlugin: NSObject, FlutterPlugin {
         }
     }
     
-    @available(iOS 26.0, *)
     private func showLiquidGlassNav(result: @escaping FlutterResult) {
         DispatchQueue.main.async {
             guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
@@ -105,7 +95,6 @@ class VPolicyLiquidGlassNavPlugin: NSObject, FlutterPlugin {
 
 // MARK: - V-Policy Native Tab Bar
 
-@available(iOS 16.0, *)
 class VPolicyNativeTabBar: UIView {
     private weak var handler: VPolicyLiquidGlassNavPlugin?
     private var selectedIndex = 0
@@ -131,7 +120,7 @@ class VPolicyNativeTabBar: UIView {
         tabBar.isAccessibilityElement = false
         tabBar.shouldGroupAccessibilityChildren = true
         
-        // iOS 26+ Liquid Glass styling
+        // iOS 18+ Liquid Glass styling
         if #available(iOS 26.0, *) {
             tabBar.isTranslucent = true
             let appearance = UITabBarAppearance()
@@ -146,7 +135,7 @@ class VPolicyNativeTabBar: UIView {
             
             tabBar.standardAppearance = appearance
             tabBar.scrollEdgeAppearance = appearance
-            print("✅ iOS 26+ Liquid Glass tab bar enabled")
+            print("✅ iOS 18+ Liquid Glass tab bar enabled")
         } else {
             tabBar.isTranslucent = false
             let appearance = UITabBarAppearance()
@@ -241,7 +230,6 @@ class VPolicyNativeTabBar: UIView {
 
 // MARK: - UITabBarDelegate
 
-@available(iOS 16.0, *)
 extension VPolicyNativeTabBar: UITabBarDelegate {
     func tabBar(_ tabBar: UITabBar, didSelect item: UITabBarItem) {
         let newIndex = item.tag

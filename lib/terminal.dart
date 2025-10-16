@@ -416,6 +416,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
   // Liquid glass state
   bool _liquidGlassSupported = false;
   bool _liquidGlassTabBarShown = false;
+  
+  // Custom shortcuts storage
+  List<Map<String, String>> _customShortcuts = [];
+  static const int maxCustomShortcuts = 10;
+  static const String _customShortcutsKey = 'custom_terminal_shortcuts';
 
   @override
   void didChangeDependencies() {
@@ -455,6 +460,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     
     // Initialize liquid glass components
     _initLiquidGlassComponents();
+    
+    // Load custom shortcuts
+    _loadCustomShortcuts();
   }
   
   Future<void> _initLiquidGlassComponents() async {
@@ -642,12 +650,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       try {
         await Clipboard.setData(ClipboardData(text: currentInput));
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Current input copied to clipboard',
+          SnackBar(
+            content: const Text('Current input copied to clipboard',
                 style: TextStyle(color: Colors.white)),
             backgroundColor: Colors.black,
             behavior: SnackBarBehavior.floating,
-            duration: Duration(seconds: 1),
+            duration: const Duration(seconds: 1),
+            margin: EdgeInsets.only(
+              bottom: MediaQuery.of(context).size.height - 200,
+              left: 20,
+              right: 20,
+            ),
           ),
         );
         debugPrint('DEBUG: Copied current input: "$currentInput"');
@@ -690,12 +703,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       try {
         await Clipboard.setData(ClipboardData(text: content));
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Last command copied to clipboard',
+          SnackBar(
+            content: const Text('Last command copied to clipboard',
                 style: TextStyle(color: Colors.white)),
             backgroundColor: Colors.black,
             behavior: SnackBarBehavior.floating,
-            duration: Duration(seconds: 1),
+            duration: const Duration(seconds: 1),
+            margin: EdgeInsets.only(
+              bottom: MediaQuery.of(context).size.height - 200,
+              left: 20,
+              right: 20,
+            ),
           ),
         );
         debugPrint('DEBUG: Copied last command: "$content"');
@@ -1094,7 +1112,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     }
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: const Color(0xFF0a0a0a),
       resizeToAvoidBottomInset: true,
       body: SafeArea(
         child: Column(
@@ -1124,7 +1142,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                           key: ValueKey('terminal_${activeTab.id}_${isPortrait ? 'portrait' : 'landscape'}'),
                           activeTab.terminal,
                           theme: TerminalTheme(
-                            background: Colors.black,
+                            background: const Color(0xFF0a0a0a),
                             foreground: Colors.white,
                             cursor: Colors.white,
                             selection: Colors.blue.withAlpha(128),
@@ -1313,6 +1331,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                       _buildServerButton('srvr'),
                       _buildFlutterButton('fltr'),
                       _buildBackupButton('bkup'),
+                      _buildCustomButton('cstm'),
                     ],
                   ),
                 ),
@@ -1386,43 +1405,27 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     );
   }
 
-  // Server commands list
+  // Web dev server commands - optimized for preview screen
   static const List<Map<String, String>> _serverCommands = [
     {
-      'command': 'flutter run -d web-server --web-port=3000 --web-hostname=0.0.0.0',
-      'description': 'Start Flutter web server accessible from mobile'
-    },
-    {
-      'command': 'ssh -R 3000:localhost:3000 -N -f username@server-ip',
-      'description': 'SSH reverse tunnel: server:3000 → Mac:3000 (edit IP)'
+      'command': 'npm run dev',
+      'description': 'Vite, Next.js, or other modern dev server'
     },
     {
       'command': 'npm start',
-      'description': 'Start Node.js development server'
+      'description': 'Create React App or standard Node server'
     },
     {
-      'command': 'npm run dev',
-      'description': 'Start Node.js dev server (Vite/Next.js)'
-    },
-    {
-      'command': 'yarn start',
-      'description': 'Start Yarn development server'
-    },
-    {
-      'command': 'yarn dev',
-      'description': 'Start Yarn dev server (Vite/Next.js)'
+      'command': 'python3 -m http.server 3000',
+      'description': 'Quick static file server on port 3000'
     },
     {
       'command': 'npx serve -s build -p 3000',
-      'description': 'Serve static build files on port 3000'
+      'description': 'Serve production build files'
     },
     {
-      'command': 'python -m http.server 8000',
-      'description': 'Quick Python HTTP server for static files'
-    },
-    {
-      'command': 'live-server --port=3000',
-      'description': 'Live-reload server for static files'
+      'command': 'php -S 0.0.0.0:3000',
+      'description': 'PHP development server'
     },
   ];
 
@@ -1749,6 +1752,374 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                 style: const TextStyle(
                   color: Colors.white,
                   fontSize: 10,
+                ),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Custom shortcuts methods
+  Future<void> _loadCustomShortcuts() async {
+    final prefs = await SharedPreferences.getInstance();
+    final shortcutsJson = prefs.getString(_customShortcutsKey);
+    if (shortcutsJson != null) {
+      try {
+        final List<dynamic> decoded = jsonDecode(shortcutsJson);
+        setState(() {
+          _customShortcuts = decoded
+              .map((item) => Map<String, String>.from(item as Map))
+              .toList();
+        });
+      } catch (e) {
+        debugPrint('Error loading custom shortcuts: $e');
+      }
+    }
+  }
+
+  Future<void> _saveCustomShortcuts() async {
+    final prefs = await SharedPreferences.getInstance();
+    final shortcutsJson = jsonEncode(_customShortcuts);
+    await prefs.setString(_customShortcutsKey, shortcutsJson);
+  }
+
+  Future<void> _addCustomShortcut(String title, String command) async {
+    if (_customShortcuts.length >= maxCustomShortcuts) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Maximum $maxCustomShortcuts shortcuts reached',
+              style: const TextStyle(color: Colors.white)),
+          backgroundColor: Colors.red.withAlpha(200),
+          behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.only(
+            bottom: MediaQuery.of(context).size.height - 200,
+            left: 20,
+            right: 20,
+          ),
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      _customShortcuts.add({'title': title, 'command': command});
+    });
+    await _saveCustomShortcuts();
+  }
+
+  Future<void> _editCustomShortcut(
+      int index, String title, String command) async {
+    setState(() {
+      _customShortcuts[index] = {'title': title, 'command': command};
+    });
+    await _saveCustomShortcuts();
+  }
+
+  Future<void> _deleteCustomShortcut(int index) async {
+    setState(() {
+      _customShortcuts.removeAt(index);
+    });
+    await _saveCustomShortcuts();
+  }
+
+  void _showAddEditShortcutDialog({int? editIndex}) {
+    final isEdit = editIndex != null;
+    final titleController = TextEditingController(
+      text: isEdit ? _customShortcuts[editIndex]['title'] : '',
+    );
+    final commandController = TextEditingController(
+      text: isEdit ? _customShortcuts[editIndex]['command'] : '',
+    );
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title: Text(
+          isEdit ? 'Edit Shortcut' : 'Add Shortcut',
+          style: const TextStyle(color: Colors.white),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: titleController,
+              style: const TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                labelText: 'Title',
+                labelStyle: const TextStyle(color: Colors.white70),
+                enabledBorder: OutlineInputBorder(
+                  borderSide: BorderSide(color: Colors.grey[700]!),
+                ),
+                focusedBorder: const OutlineInputBorder(
+                  borderSide: BorderSide(color: Colors.white),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: commandController,
+              style: const TextStyle(color: Colors.white),
+              maxLines: 3,
+              decoration: InputDecoration(
+                labelText: 'Command',
+                labelStyle: const TextStyle(color: Colors.white70),
+                enabledBorder: OutlineInputBorder(
+                  borderSide: BorderSide(color: Colors.grey[700]!),
+                ),
+                focusedBorder: const OutlineInputBorder(
+                  borderSide: BorderSide(color: Colors.white),
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white70)),
+          ),
+          TextButton(
+            onPressed: () {
+              final title = titleController.text.trim();
+              final command = commandController.text.trim();
+              if (title.isNotEmpty && command.isNotEmpty) {
+                if (isEdit) {
+                  _editCustomShortcut(editIndex, title, command);
+                } else {
+                  _addCustomShortcut(title, command);
+                }
+                Navigator.of(context).pop();
+              }
+            },
+            child: Text(
+              isEdit ? 'Save' : 'Add',
+              style: const TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCustomButton(String text) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 2.0),
+      child: Material(
+        color: Colors.grey[800],
+        borderRadius: BorderRadius.circular(6),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(6),
+          onTap: () {
+            // Show popup with custom shortcuts
+            showDialog(
+              context: context,
+              barrierColor: Colors.transparent,
+              builder: (context) => AlertDialog(
+                backgroundColor: Colors.transparent,
+                elevation: 0,
+                contentPadding: EdgeInsets.zero,
+                insetPadding: const EdgeInsets.all(16),
+                content: SizedBox(
+                  width: double.maxFinite,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: MediaQuery.of(context).size.height * 0.5,
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Add new shortcut button
+                        if (_customShortcuts.length < maxCustomShortcuts)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 6),
+                            child: InkWell(
+                              onTap: () {
+                                Navigator.of(context).pop();
+                                _showAddEditShortcutDialog();
+                              },
+                              child: Container(
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: Colors.blue[700],
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: const Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(Icons.add, color: Colors.white, size: 18),
+                                    SizedBox(width: 8),
+                                    Text(
+                                      'Add Custom Shortcut',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        // Custom shortcuts list
+                        Expanded(
+                          child: _customShortcuts.isEmpty
+                              ? Center(
+                                  child: Text(
+                                    'No custom shortcuts yet.\nTap "Add Custom Shortcut" to create one.',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      color: Colors.grey[400],
+                                      fontSize: 14,
+                                    ),
+                                  ),
+                                )
+                              : GridView.builder(
+                                  shrinkWrap: true,
+                                  physics: const AlwaysScrollableScrollPhysics(),
+                                  gridDelegate:
+                                      const SliverGridDelegateWithMaxCrossAxisExtent(
+                                    maxCrossAxisExtent: 320,
+                                    mainAxisSpacing: 6,
+                                    crossAxisSpacing: 6,
+                                    childAspectRatio: 2.5,
+                                  ),
+                                  itemCount: _customShortcuts.length,
+                                  itemBuilder: (context, index) {
+                                    final shortcut = _customShortcuts[index];
+                                    return _buildCustomShortcutOption(
+                                      shortcut['title']!,
+                                      shortcut['command']!,
+                                      index,
+                                    );
+                                  },
+                                ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Text(
+              text,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCustomShortcutOption(String title, String command, int index) {
+    return InkWell(
+      onTap: () {
+        Navigator.of(context).pop();
+        _insertText(command);
+      },
+      onLongPress: () {
+        // Show edit/delete options on long press
+        Navigator.of(context).pop();
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            backgroundColor: Colors.grey[900],
+            title: Text(
+              title,
+              style: const TextStyle(color: Colors.white),
+            ),
+            content: Text(
+              command,
+              style: const TextStyle(
+                color: Colors.white70,
+                fontFamily: 'monospace',
+                fontSize: 12,
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.of(context).pop();
+                  _showAddEditShortcutDialog(editIndex: index);
+                },
+                child: const Text(
+                  'Edit',
+                  style: TextStyle(color: Colors.blue),
+                ),
+              ),
+              TextButton(
+                onPressed: () {
+                  Navigator.of(context).pop();
+                  _deleteCustomShortcut(index);
+                },
+                child: const Text(
+                  'Delete',
+                  style: TextStyle(color: Colors.red),
+                ),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text(
+                  'Cancel',
+                  style: TextStyle(color: Colors.white70),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+      child: Container(
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: Colors.grey[800],
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: Colors.grey[700]!, width: 1),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    title,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const Icon(
+                  Icons.more_vert,
+                  color: Colors.white70,
+                  size: 16,
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Expanded(
+              child: Text(
+                command,
+                style: const TextStyle(
+                  color: Colors.white70,
+                  fontSize: 10,
+                  fontFamily: 'monospace',
                 ),
                 maxLines: 3,
                 overflow: TextOverflow.ellipsis,
