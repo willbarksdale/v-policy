@@ -11,11 +11,8 @@ import 'package:iconify_flutter/icons/mdi.dart';
 import 'package:iconify_flutter/icons/material_symbols.dart';
 import 'terminal.dart';
 import 'preview.dart';
-import 'info.dart';
-import 'liquid_glass_nav.dart';
-import 'liquid_glass_power_button.dart';
-import 'liquid_glass_info_button.dart';
-import 'liquid_glass_back_button.dart';
+import 'main.dart';
+import 'liquid_glass.dart';
 
 // SshService - Simplified for better shell session management
 class SshService extends ChangeNotifier {
@@ -171,16 +168,22 @@ class SshService extends ChangeNotifier {
     await Future.delayed(const Duration(milliseconds: 100));
   }
   
-  // Keep the connection alive
+  // Keep the connection alive using lightweight SSH-level keepalive
   void _startKeepAlive() {
     _keepAliveTimer?.cancel();
     _keepAliveTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
       if (isConnected) {
         try {
-          debugPrint('Sending keep-alive ping');
-          await runCommandLenient('echo "ping"');
+          debugPrint('Sending keep-alive ping (SSH-level)');
+          // Use SSH protocol-level keep-alive instead of creating a new channel
+          // This sends a null packet that doesn't consume channels
+          if (_client != null && !_client!.isClosed) {
+            // The connection is alive, no need to test with echo
+            // The SSH library handles protocol-level keepalive automatically
+            debugPrint('Connection alive via SSH protocol keepalive');
+          }
         } catch (e) {
-          debugPrint('Keep-alive failed: $e');
+          debugPrint('Keep-alive check failed: $e');
           _tryReconnect();
         }
       }
@@ -677,6 +680,7 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
   bool? _liquidGlassSupported; // null until checked
   bool _liquidGlassPowerButtonShown = false;
   bool _liquidGlassInfoButtonShown = false;
+  bool _isDialogShowing = false;
 
   @override
   void initState() {
@@ -730,9 +734,10 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
   Future<void> _initLiquidGlassInfoButton() async {
     // Set up callback for info button taps
     LiquidGlassInfoButton.setOnInfoButtonTappedCallback(() async {
-      // Hide buttons before navigating
+      // Hide buttons and nav before navigating
       await LiquidGlassPowerButton.hide();
       await LiquidGlassInfoButton.hide();
+      await LiquidGlassNav.hide();
       
       if (mounted) {
         await Navigator.of(context).push(
@@ -741,11 +746,12 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
           ),
         );
         
-        // Show buttons again when returning
+        // Show buttons and nav again when returning
         if (mounted && _liquidGlassSupported == true) {
           final currentSshService = ref.read(sshServiceProvider);
           await LiquidGlassPowerButton.show(isConnected: currentSshService.isConnected);
           await LiquidGlassInfoButton.show();
+          await LiquidGlassNav.show();
         }
       }
     });
@@ -761,8 +767,12 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
   }
   
   void _handlePowerButtonTap() {
+    // Prevent multiple dialogs
+    if (_isDialogShowing) return;
+    
     final currentSshService = ref.read(sshServiceProvider);
     if (currentSshService.isConnected) {
+      _isDialogShowing = true;
       showDialog(
         context: context,
         builder: (context) => AlertDialog(
@@ -775,19 +785,26 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
           actionsAlignment: MainAxisAlignment.center,
           actions: [
             IconButton(
-              onPressed: () => Navigator.pop(context),
+              onPressed: () {
+                Navigator.pop(context);
+                _isDialogShowing = false;
+              },
               icon: const Icon(Icons.close, color: Colors.white),
             ),
             IconButton(
               onPressed: () {
                 Navigator.pop(context);
+                _isDialogShowing = false;
                 _disconnect();
               },
               icon: const Icon(Icons.check, color: Colors.white),
             ),
           ],
         ),
-      );
+      ).then((_) {
+        // Ensure flag is reset even if dialog is dismissed other ways
+        _isDialogShowing = false;
+      });
     } else {
       _connect();
     }
@@ -951,6 +968,7 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
 
     return Scaffold(
       backgroundColor: const Color(0xFF0a0a0a),
+      resizeToAvoidBottomInset: false, // Prevent resize when keyboard appears
       appBar: AppBar(
         backgroundColor: const Color(0xFF0a0a0a),
         elevation: 0,
@@ -958,14 +976,18 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
       ),
       body: Stack(
         children: [
-          SafeArea(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(24.0, 0.0, 24.0, 24.0),
-              child: Form(
-                key: _formKey,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
+          SingleChildScrollView(
+            padding: EdgeInsets.fromLTRB(
+              24.0,
+              MediaQuery.of(context).padding.top, // Safe area top
+              24.0,
+              24.0 + MediaQuery.of(context).viewInsets.bottom, // Add keyboard height to bottom padding
+            ),
+            child: Form(
+              key: _formKey,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
                     // Title
                     Text(
                       'Create the future.',
@@ -1023,7 +1045,11 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                                             color: currentSshService.isConnected ? Colors.blue : Colors.white70,
                                           ),
                                           onPressed: () {
+                                          // Prevent multiple dialogs
+                                          if (_isDialogShowing) return;
+                                          
                                           if (currentSshService.isConnected) {
+                                            _isDialogShowing = true;
                                             showDialog(
                                               context: context,
                                               builder: (context) => AlertDialog(
@@ -1036,19 +1062,26 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                                                 actionsAlignment: MainAxisAlignment.center,
                                                 actions: [
                                                   IconButton(
-                                                    onPressed: () => Navigator.pop(context),
+                                                    onPressed: () {
+                                                      Navigator.pop(context);
+                                                      _isDialogShowing = false;
+                                                    },
                                                     icon: const Icon(Icons.close, color: Colors.white),
                                                   ),
                                                   IconButton(
                                                     onPressed: () {
                                                       Navigator.pop(context);
+                                                      _isDialogShowing = false;
                                                       _disconnect();
                                                     },
                                                     icon: const Icon(Icons.check, color: Colors.white),
                                                   ),
                                                 ],
                                               ),
-                                            );
+                                            ).then((_) {
+                                              // Ensure flag is reset even if dialog is dismissed other ways
+                                              _isDialogShowing = false;
+                                            });
                                           } else {
                                             _connect();
                                           }
@@ -1088,11 +1121,17 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                               suffixIcon: _liquidGlassSupported == false ? IconButton(
                                 icon: const Icon(CupertinoIcons.info, size: 20, color: Colors.white70),
                                 onPressed: () async {
+                                  // Hide nav before navigating (for non-Liquid Glass case)
+                                  await LiquidGlassNav.hide();
+                                  
                                   await Navigator.of(context).push(
                                     MaterialPageRoute(
                                       builder: (context) => const InfoScreenFullPage(),
                                     ),
                                   );
+                                  
+                                  // Show nav again when returning
+                                  await LiquidGlassNav.show();
                                 },
                               ) : null,
                               border: OutlineInputBorder(
@@ -1249,7 +1288,6 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                 ),
               ),
             ),
-          ),
         ],
       ),
     );

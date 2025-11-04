@@ -28,6 +28,9 @@ import UIKit
     // Register Liquid Glass tab bar plugin
     LiquidGlassTabBarPlugin.register(with: self.registrar(forPlugin: "LiquidGlassTabBarPlugin")!)
     
+    // Register Liquid Glass terminal input plugin
+    LiquidGlassTerminalInputPlugin.register(with: self.registrar(forPlugin: "LiquidGlassTerminalInputPlugin")!)
+    
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 }

@@ -4,8 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:webview_flutter/webview_flutter.dart' as wv;
 import 'dart:async';
 import 'ssh.dart';
-import 'liquid_glass_play_button.dart';
-import 'liquid_glass_nav.dart';
+import 'liquid_glass.dart';
 
 // Preview settings provider
 final previewUrlProvider = StateProvider<String?>((ref) => null);
@@ -247,14 +246,14 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
 
   Widget _buildPreviewContent(String? previewUrl, bool isConnected) {
     if (!isConnected) {
-      return const SafeArea(
+      return SafeArea(
         child: Center(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Text(
                 'Connect to your server to use preview',
-                style: TextStyle(color: Colors.grey, fontSize: 16),
+                style: TextStyle(color: Colors.grey[400], fontSize: 16),
               ),
             ],
           ),

@@ -1,61 +1,72 @@
-import 'dart:convert';
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:dartssh2/dartssh2.dart' as dartssh2;
 import 'package:xterm/xterm.dart';
+import 'package:dartssh2/dartssh2.dart' as dartssh2;
 import 'ssh.dart';
+import 'tmux.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'liquid_glass_tab_bar.dart';
+import 'liquid_glass.dart';
 
-// Terminal Tab Model
+// Terminal Tab Model (backed by tmux windows or fallback shell session)
 class TerminalTab {
   final String id;
   final String name;
   final Terminal terminal;
-  final TerminalService service;
+  final int tmuxWindowId; // -1 for non-tmux tabs
+  final dartssh2.SSHSession? shellSession; // For fallback mode
 
   TerminalTab({
     required this.id,
     required this.name,
     required this.terminal,
-    required this.service,
+    required this.tmuxWindowId,
+    this.shellSession,
   });
 
-  TerminalTab copyWith({
-    String? id,
-    String? name,
-    Terminal? terminal,
-    TerminalService? service,
-  }) {
+  TerminalTab copyWith({String? name}) {
     return TerminalTab(
-      id: id ?? this.id,
+      id: id,
       name: name ?? this.name,
-      terminal: terminal ?? this.terminal,
-      service: service ?? this.service,
+      terminal: terminal,
+      tmuxWindowId: tmuxWindowId,
+      shellSession: shellSession,
     );
   }
 }
 
-// Terminal Tabs State
+// Terminal State
 class TerminalTabsState {
   final List<TerminalTab> tabs;
   final int activeTabIndex;
+  final bool tmuxReady;
+  final bool fallbackMode; // Using basic terminal without tmux
+  final String? statusMessage;
 
   TerminalTabsState({
     required this.tabs,
     required this.activeTabIndex,
+    this.tmuxReady = false,
+    this.fallbackMode = false,
+    this.statusMessage,
   });
 
   TerminalTabsState copyWith({
     List<TerminalTab>? tabs,
     int? activeTabIndex,
+    bool? tmuxReady,
+    bool? fallbackMode,
+    String? statusMessage,
+    bool clearStatusMessage = false,
   }) {
     return TerminalTabsState(
       tabs: tabs ?? this.tabs,
       activeTabIndex: activeTabIndex ?? this.activeTabIndex,
+      tmuxReady: tmuxReady ?? this.tmuxReady,
+      fallbackMode: fallbackMode ?? this.fallbackMode,
+      statusMessage: clearStatusMessage ? null : (statusMessage ?? this.statusMessage),
     );
   }
 
@@ -65,340 +76,390 @@ class TerminalTabsState {
           : null;
 }
 
-// Terminal Tabs Provider
+// Tmux Service Provider
+final tmuxServiceProvider = Provider<TmuxService>((ref) {
+  final sshService = ref.watch(sshServiceProvider);
+  final tmuxService = TmuxService(sshService);
+  
+  ref.onDispose(() {
+    debugPrint('Disposing TmuxService');
+    tmuxService.dispose();
+  });
+  
+  return tmuxService;
+});
+
+// Terminal Tabs Provider (tmux-based)
 final terminalTabsProvider =
     StateNotifierProvider<TerminalTabsNotifier, TerminalTabsState>((ref) {
   final sshService = ref.watch(sshServiceProvider);
-  final notifier = TerminalTabsNotifier(sshService, ref);
+  final tmuxService = ref.watch(tmuxServiceProvider);
+  final notifier = TerminalTabsNotifier(sshService, tmuxService);
 
-  // Add a robust listener to always create a tab after any connection
+  // Initialize tmux when SSH connects
   ref.listen<SshService>(sshServiceProvider, (previous, next) {
-    debugPrint('TerminalTabsProvider: SSH Service changed: isConnected=${next.isConnected}');
-    if (next.isConnected) {
-      notifier.createNewTab();
+    if (next.isConnected && previous != null && !previous.isConnected) {
+      debugPrint('SSH connected, initializing tmux...');
+      notifier.initializeTmux();
     }
   });
 
   return notifier;
 });
 
-// Terminal Tabs Notifier
+// Terminal Tabs Notifier (tmux-based)
 class TerminalTabsNotifier extends StateNotifier<TerminalTabsState> {
   final SshService _sshService;
-  final Ref _ref;
-  static const int maxTabs = 5; // Maximum number of terminal tabs
-  static const String _prefsTabsKey = 'terminal_tabs';
-  static const String _prefsActiveTabKey = 'terminal_active_tab';
-  bool _tabsRestored = false;
+  final TmuxService _tmuxService;
+  static const int maxTabs = 3;
+  
+  StreamSubscription? _tmuxEventsSubscription;
+  bool _isInitializing = false;
 
-  TerminalTabsNotifier(this._sshService, this._ref)
+  TerminalTabsNotifier(this._sshService, this._tmuxService)
       : super(TerminalTabsState(tabs: [], activeTabIndex: -1)) {
-    _initializeFirstTab();
-    _restoreTabsFromPrefs();
-
-    _ref.listen<SshService>(sshServiceProvider, (previous, next) {
-      if (next.isConnected && state.tabs.isEmpty) {
-        createNewTab();
+    // Listen to tmux events
+    _tmuxEventsSubscription = _tmuxService.events.listen(_handleTmuxEvent);
+  }
+  
+  void _handleTmuxEvent(TmuxEvent event) {
+    debugPrint('📨 Handling tmux event: ${event.runtimeType}');
+    
+    if (event is TmuxWindowCreated) {
+      // Create a tab for the new window
+      debugPrint('🪟 Window created event: ${event.window.id}');
+      _createTabForWindow(event.window.id);
+    } else if (event is TmuxOutput) {
+      // Find the tab for this window and update its terminal
+      try {
+        final tab = state.tabs.firstWhere(
+          (t) => t.tmuxWindowId == event.windowId,
+        );
+        tab.terminal.write(event.output);
+      } catch (e) {
+        debugPrint('No tab found for window ${event.windowId}');
       }
-    });
-  }
-
-  void _initializeFirstTab() {
-    if (_sshService.isConnected) {
-      createNewTab();
+    } else if (event is TmuxError) {
+      debugPrint('❌ tmux error event: ${event.message}');
+      state = state.copyWith(statusMessage: 'Error: ${event.message}');
     }
   }
 
-  Future<void> _saveTabsToPrefs() async {
-    final prefs = await SharedPreferences.getInstance();
-    final tabNames = state.tabs.map((t) => t.name).toList();
-    await prefs.setStringList(_prefsTabsKey, tabNames);
-    await prefs.setInt(_prefsActiveTabKey, state.activeTabIndex);
-  }
-
-  Future<void> _restoreTabsFromPrefs() async {
-    if (_tabsRestored || state.tabs.isNotEmpty) return;
-    _tabsRestored = true;
-    final prefs = await SharedPreferences.getInstance();
-    final tabNames = prefs.getStringList(_prefsTabsKey);
-    final activeIndex = prefs.getInt(_prefsActiveTabKey) ?? -1;
-    if (tabNames != null &&
-        tabNames.isNotEmpty &&
-        _sshService.isConnected) {
-      final tabs = <TerminalTab>[];
-      for (final name in tabNames) {
-        final tabId = DateTime.now().millisecondsSinceEpoch.toString();
-        final terminal = Terminal();
-        final service = TerminalService(_sshService, terminal);
-        tabs.add(
-            TerminalTab(id: tabId, name: name, terminal: terminal, service: service));
+  Future<void> initializeTmux() async {
+    if (_isInitializing || _tmuxService.isInitialized) {
+      debugPrint('tmux already initializing or initialized');
+      return;
+    }
+    
+    _isInitializing = true;
+    state = state.copyWith(statusMessage: 'Checking tmux...');
+    debugPrint('🔍 Checking tmux installation...');
+    
+    // Load cached tmux info first
+    await _tmuxService.loadCachedTmuxInfo();
+    
+    try {
+      // Add timeout to prevent infinite loading
+      final checkResult = await _tmuxService.checkTmuxInstalled()
+          .timeout(const Duration(seconds: 10), onTimeout: () {
+        debugPrint('⏱️ tmux check timed out, assuming not installed');
+        return TmuxCheckResult.notInstalledUnknown;
+      });
+      
+      debugPrint('📋 tmux check result: $checkResult');
+      
+      if (checkResult == TmuxCheckResult.installed) {
+        // tmux is ready, initialize it
+        debugPrint('✅ tmux found, initializing...');
+        state = state.copyWith(statusMessage: 'Initializing persistent terminal...');
+        
+        final success = await _tmuxService.initialize()
+            .timeout(const Duration(seconds: 10), onTimeout: () {
+          debugPrint('⏱️ tmux initialization timed out');
+          return false;
+        });
+        
+        debugPrint('🎯 tmux initialize result: $success');
+        
+        if (success) {
+          debugPrint('✅ tmux initialized successfully');
+          // The first tab will be created automatically by the TmuxWindowCreated event
+          state = state.copyWith(
+            tmuxReady: true,
+            statusMessage: 'tmux_success', // Special flag for success state
+          );
+          
+          // Clear success message after 3 seconds
+          Future.delayed(const Duration(seconds: 3), () {
+            debugPrint('⏰ Auto-dismissing tmux success banner');
+            if (state.statusMessage == 'tmux_success') {
+              state = state.copyWith(statusMessage: null);
+            }
+          });
+        } else {
+          debugPrint('❌ Failed to start tmux session, falling back to basic terminal');
+          // Fall back to basic terminal if tmux fails
+          state = state.copyWith(
+            fallbackMode: true,
+            statusMessage: 'tmux_not_installed:notInstalledUnknown',
+          );
+          await createFallbackTerminal();
+        }
+      } else {
+        // tmux not installed - enable fallback mode with basic terminal
+        debugPrint('⚠️ tmux not installed, enabling fallback mode');
+        state = state.copyWith(
+          fallbackMode: true,
+          statusMessage: 'tmux_not_installed:${checkResult.name}',
+        );
+        // Create a basic fallback terminal
+        debugPrint('📝 Creating fallback terminal...');
+        await createFallbackTerminal();
+        debugPrint('✅ Fallback terminal creation completed');
       }
-      state = TerminalTabsState(
-          tabs: tabs, activeTabIndex: activeIndex.clamp(0, tabs.length - 1));
+    } catch (e, stackTrace) {
+      debugPrint('❌ Error checking/initializing tmux: $e');
+      debugPrint('Stack trace: $stackTrace');
+      
+      // On any error, fall back to basic terminal
+      debugPrint('🔄 Falling back to basic terminal due to error');
+      state = state.copyWith(
+        fallbackMode: true,
+        statusMessage: 'tmux_not_installed:notInstalledUnknown',
+      );
+      
+      try {
+        await createFallbackTerminal();
+      } catch (fallbackError) {
+        debugPrint('❌ Fallback terminal creation also failed: $fallbackError');
+        state = state.copyWith(statusMessage: 'Error: Failed to create terminal');
+      }
+    } finally {
+      _isInitializing = false;
+      debugPrint('🏁 initializeTmux finished, isInitializing: false');
+    }
+  }
+  
+  Future<void> installAndInitializeTmux(TmuxCheckResult osType) async {
+    state = state.copyWith(statusMessage: 'Installing tmux...');
+    
+    try {
+      final installed = await _tmuxService.installTmux(osType);
+      
+      if (installed) {
+        // Now initialize
+        state = state.copyWith(statusMessage: 'Initializing persistent terminal...');
+        final success = await _tmuxService.initialize();
+        
+        if (success) {
+          await _createTabForWindow(0);
+          state = state.copyWith(
+            tmuxReady: true,
+            statusMessage: null,
+          );
+        } else {
+          state = state.copyWith(
+            statusMessage: 'Failed to start tmux session',
+          );
+        }
+      } else {
+        state = state.copyWith(
+          statusMessage: 'Failed to install tmux. Please install manually.',
+        );
+      }
+    } catch (e) {
+      debugPrint('Error installing tmux: $e');
+      state = state.copyWith(statusMessage: 'Installation error: $e');
     }
   }
 
-  void createNewTab() {
-    // Check max tabs limit
-    if (state.tabs.length >= maxTabs) {
-      return; // Don't create more tabs if at limit
-    }
-
+  Future<void> _createTabForWindow(int windowId) async {
     final tabId = DateTime.now().millisecondsSinceEpoch.toString();
     final tabName = '${state.tabs.length + 1}';
-    final terminal = Terminal();
-    final service = TerminalService(_sshService, terminal);
+    final terminal = Terminal(maxLines: 10000);
 
     final newTab = TerminalTab(
       id: tabId,
       name: tabName,
       terminal: terminal,
-      service: service,
+      tmuxWindowId: windowId,
     );
 
     state = state.copyWith(
       tabs: [...state.tabs, newTab],
       activeTabIndex: state.tabs.length,
     );
-    _saveTabsToPrefs();
+    
+    debugPrint('Created tab for tmux window $windowId');
   }
 
-  void switchToTab(int index) {
-    if (index >= 0 && index < state.tabs.length) {
-      state = state.copyWith(activeTabIndex: index);
-      _saveTabsToPrefs();
+  // Create a basic fallback terminal (no tmux)
+  Future<void> createFallbackTerminal() async {
+    debugPrint('📝 Creating fallback terminal (no tmux)...');
+    
+    try {
+      final tabId = DateTime.now().millisecondsSinceEpoch.toString();
+      debugPrint('  ↳ Tab ID: $tabId');
+      
+      final terminal = Terminal(maxLines: 10000);
+      debugPrint('  ↳ Terminal object created');
+
+      // Open a basic shell session
+      debugPrint('  ↳ Opening SSH shell session...');
+      final session = await _sshService.shell()
+          .timeout(const Duration(seconds: 5), onTimeout: () {
+        debugPrint('  ⏱️ Shell session creation timed out');
+        return null;
+      });
+      
+      if (session == null) {
+        debugPrint('  ❌ Failed to open shell for fallback terminal');
+        state = state.copyWith(statusMessage: 'Failed to open shell');
+        return;
+      }
+      
+      debugPrint('  ✅ Shell session created');
+
+      final newTab = TerminalTab(
+        id: tabId,
+        name: 'Terminal',
+        terminal: terminal,
+        tmuxWindowId: -1, // -1 indicates non-tmux tab
+        shellSession: session,
+      );
+      
+      debugPrint('  ↳ Tab object created');
+
+      // Listen to session output
+      session.stdout.listen(
+        (data) {
+          final output = utf8.decode(data);
+          terminal.write(output);
+        },
+        onError: (error) {
+          debugPrint('  ❌ Stdout error: $error');
+        },
+      );
+
+      session.stderr.listen(
+        (data) {
+          final output = utf8.decode(data);
+          terminal.write(output);
+        },
+        onError: (error) {
+          debugPrint('  ❌ Stderr error: $error');
+        },
+      );
+      
+      debugPrint('  ↳ Output listeners attached');
+
+      state = state.copyWith(
+        tabs: [newTab],
+        activeTabIndex: 0,
+        statusMessage: null,
+      );
+      
+      debugPrint('✅ Fallback terminal created successfully! Tab count: ${state.tabs.length}');
+    } catch (e, stackTrace) {
+      debugPrint('❌ Exception in createFallbackTerminal: $e');
+      debugPrint('Stack trace: $stackTrace');
+      state = state.copyWith(statusMessage: 'Error creating terminal: $e');
+      rethrow;
     }
   }
 
-  void closeTab(int index) {
-    if (state.tabs.length <= 1) return; // Don't close the last tab
+  Future<void> createNewTab() async {
+    debugPrint('🆕 createNewTab() called - Current tabs: ${state.tabs.length}');
+    
+    // Prevent exceeds max tabs
+    if (state.tabs.length >= maxTabs) {
+      debugPrint('⚠️ Already at max tabs ($maxTabs), ignoring createNewTab');
+      return;
+    }
+    
+    // In fallback mode, only allow one tab
+    if (state.fallbackMode) {
+      state = state.copyWith(statusMessage: 'Install tmux for multiple tabs');
+      return;
+    }
 
+    if (state.tabs.length >= maxTabs) {
+      state = state.copyWith(statusMessage: 'Maximum $maxTabs tabs reached');
+      return;
+    }
+
+    if (!_tmuxService.isInitialized) {
+      state = state.copyWith(statusMessage: 'tmux not ready');
+      return;
+    }
+
+    final windowId = await _tmuxService.createWindow();
+    
+    if (windowId != null) {
+      debugPrint('   ✅ Created window $windowId');
+      await _createTabForWindow(windowId);
+      state = state.copyWith(statusMessage: null);
+    }
+  }
+
+  Future<void> switchToTab(int index) async {
+    if (index >= 0 && index < state.tabs.length) {
+      final tab = state.tabs[index];
+      await _tmuxService.switchToWindow(tab.tmuxWindowId);
+      state = state.copyWith(activeTabIndex: index);
+    }
+  }
+
+  Future<void> closeTab(int index) async {
+    if (state.tabs.length <= 1) {
+      state = state.copyWith(statusMessage: 'Cannot close last tab');
+      return;
+    }
+
+    final tab = state.tabs[index];
+    await _tmuxService.closeWindow(tab.tmuxWindowId);
+    
     final tabs = List<TerminalTab>.from(state.tabs);
-    final closedTab = tabs.removeAt(index);
+    tabs.removeAt(index);
 
-    // Dispose the closed tab's service
-    closedTab.service.dispose();
-
-    // Adjust active tab index
     int newActiveIndex = state.activeTabIndex;
-    if (index == state.activeTabIndex) {
-      // If closing active tab, switch to previous tab or first tab
-      newActiveIndex = index > 0 ? index - 1 : 0;
-    } else if (index < state.activeTabIndex) {
-      // If closing tab before active tab, adjust index
-      newActiveIndex = state.activeTabIndex - 1;
+    if (index <= state.activeTabIndex) {
+      newActiveIndex = (state.activeTabIndex - 1).clamp(0, tabs.length - 1);
     }
 
     state = state.copyWith(
       tabs: tabs,
       activeTabIndex: newActiveIndex,
+      statusMessage: null,
     );
-    _saveTabsToPrefs();
+  }
+  
+  Future<void> sendInput(String text) async {
+    if (state.fallbackMode) {
+      // Fallback mode: write directly to the shell session
+      final activeTab = state.activeTab;
+      if (activeTab?.shellSession != null) {
+        activeTab!.shellSession!.write(utf8.encode(text));
+      }
+    } else {
+      // tmux mode: use tmux service
+      if (!_tmuxService.isInitialized) return;
+      await _tmuxService.sendInput(text);
+    }
   }
 
-  void renameTab(int index, String newName) {
-    if (index >= 0 && index < state.tabs.length) {
-      final tabs = List<TerminalTab>.from(state.tabs);
-      tabs[index] = tabs[index].copyWith(name: newName);
-      state = state.copyWith(tabs: tabs);
-      _saveTabsToPrefs();
-    }
+  void clearStatusMessage() {
+    state = state.copyWith(clearStatusMessage: true);
   }
 
   @override
   void dispose() {
-    // Dispose all terminal services
-    for (final tab in state.tabs) {
-      tab.service.dispose();
-    }
+    _tmuxEventsSubscription?.cancel();
     super.dispose();
   }
 }
 
-// TerminalService
-class TerminalService {
-  final SshService _sshService;
-  final Terminal _terminal;
-  dartssh2.SSHSession? _shellSession;
-  StreamSubscription? _stdoutSubscription;
-
-  TerminalService(this._sshService, this._terminal) {
-    _initializeTerminal();
-    _terminal.onResize = (width, height, pixelWidth, pixelHeight) {
-      // Add a small delay to prevent echo in portrait mode
-      Future.delayed(const Duration(milliseconds: 50), () {
-        resize(width, height);
-      });
-    };
-
-    _sshService.addListener(_onSshServiceChange);
-  }
-
-  void _onSshServiceChange() {
-    if (_sshService.isConnected) {
-      _startShell();
-    }
-  }
-
-  void _initializeTerminal() {
-    if (_sshService.isConnected) {
-      debugPrint('DEBUG: Initializing terminal service');
-      _startShell();
-    }
-  }
-
-  Future<void> _startShell() async {
-    debugPrint('DEBUG: _TerminalScreenState._startShell() - Attempting to start shell.');
-    try {
-      _shellSession = await _sshService.shell();
-      if (_shellSession == null) {
-        debugPrint('DEBUG: _TerminalScreenState._startShell() - Shell session is null.');
-        return;
-      }
-      debugPrint('DEBUG: _TerminalScreenState._startShell() - Shell session obtained. Listening to stdout.');
-      _stdoutSubscription = _shellSession!.stdout.listen((data) {
-        final output = utf8.decode(data);
-        _terminal.write(output);
-      });
-    } catch (e) {
-      debugPrint('DEBUG: _TerminalScreenState._startShell() - Shell session error: $e');
-    }
-  }
-
-  void writeToShell(String text) {
-    if (_shellSession != null) {
-      _shellSession!.write(utf8.encode(text));
-    }
-  }
-
-  void resize(int width, int height) {
-    _shellSession?.resizeTerminal(width, height);
-  }
-
-
-
-  void dispose() {
-    _stdoutSubscription?.cancel();
-    _shellSession?.close();
-    _sshService.removeListener(_onSshServiceChange);
-  }
-}
-
-// Terminal Tab Bar Widget
-class TerminalTabBar extends ConsumerWidget {
-  final bool hidePlusButton;
-  
-  const TerminalTabBar({super.key, this.hidePlusButton = false});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final tabsState = ref.watch(terminalTabsProvider);
-    final tabsNotifier = ref.read(terminalTabsProvider.notifier);
-
-    return Container(
-      height: 40,
-      color: Colors.black, // Changed color to black
-      child: Row(
-        children: [
-          // Tab buttons
-          Expanded(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  for (int i = 0; i < tabsState.tabs.length; i++)
-                    _buildTabButton(
-                      context,
-                      tabsState.tabs[i],
-                      i,
-                      i == tabsState.activeTabIndex,
-                      () => tabsNotifier.switchToTab(i),
-                      () => tabsNotifier.closeTab(i),
-                    ),
-                ],
-              ),
-            ),
-          ),
-          // New tab button (hide if liquid glass is supported)
-          if (!hidePlusButton)
-            Material(
-              color: Colors.transparent,
-              child: InkWell(
-                onTap: tabsState.tabs.length < TerminalTabsNotifier.maxTabs
-                    ? () => tabsNotifier.createNewTab()
-                    : null,
-                child: SizedBox(
-                  width: 40,
-                  height: 40,
-                  child: Icon(
-                    Icons.add,
-                    color: tabsState.tabs.length < TerminalTabsNotifier.maxTabs
-                        ? Colors.white
-                        : Colors.grey[600],
-                    size: 20,
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTabButton(
-    BuildContext context,
-    TerminalTab tab,
-    int index,
-    bool isActive,
-    VoidCallback onTap,
-    VoidCallback onClose,
-  ) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 1),
-      child: Material(
-        color: Colors.transparent, // No background highlighting
-        child: InkWell(
-          onTap: onTap,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            constraints: const BoxConstraints(minWidth: 100, maxWidth: 200),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Flexible(
-                  child: Text(
-                    tab.name,
-                    style: TextStyle(
-                      color: isActive ? Colors.white : Colors.grey[400],
-                      fontSize: isActive ? 14 : 12, // Larger font for active tab
-                      fontWeight: isActive
-                          ? FontWeight.w600
-                          : FontWeight.normal, // Slightly bolder for active
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                GestureDetector(
-                  onTap: onClose,
-                  child: Icon(
-                    Icons.close,
-                    size: isActive
-                        ? 16
-                        : 14, // Slightly larger close icon for active tab
-                    color: isActive ? Colors.white : Colors.grey[400],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// Enhanced Terminal Widget with simplified keyboard handling
+// Main Terminal Screen
 class TerminalScreen extends ConsumerStatefulWidget {
   const TerminalScreen({super.key});
 
@@ -409,72 +470,79 @@ class TerminalScreen extends ConsumerStatefulWidget {
 class _TerminalScreenState extends ConsumerState<TerminalScreen> {
   final FocusNode _terminalFocus = FocusNode();
   final TextEditingController _terminalController = TextEditingController();
-
-  // Track previous input for real-time sync
   String _previousInput = '';
+  bool _hasText = false;
   
-  // Liquid glass state
-  bool _liquidGlassSupported = false;
   bool _liquidGlassTabBarShown = false;
+  bool _liquidGlassTerminalInputShown = false;
+  bool _nativeKeyboardVisible = false;  // Track native iOS keyboard state
+  bool _isCreatingTab = false;  // Debounce flag for tab creation
   
-  // Custom shortcuts storage
+  // Custom shortcuts
   List<Map<String, String>> _customShortcuts = [];
   static const int maxCustomShortcuts = 10;
   static const String _customShortcutsKey = 'custom_terminal_shortcuts';
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    // Listen for SSH reconnect and restore/create tabs
-    final sshService = ref.watch(sshServiceProvider);
-    final tabsNotifier = ref.read(terminalTabsProvider.notifier);
-    
-    if (sshService.isConnected) {
-      // Try to restore tabs first
-      tabsNotifier._restoreTabsFromPrefs();
-      
-      // If still no tabs after a short delay, create one
-      Future.delayed(const Duration(milliseconds: 500), () {
-        if (mounted) {
-          final currentState = ref.read(terminalTabsProvider);
-          if (currentState.tabs.isEmpty && sshService.isConnected) {
-            debugPrint('TerminalScreen: Auto-creating first tab');
-            tabsNotifier.createNewTab();
-          }
-        }
-      });
-    }
-  }
+  
+  // Server commands for web development
+  static const List<Map<String, String>> _serverCommands = [
+    {'command': 'npm run dev', 'description': 'Vite, Next.js, or other modern dev server'},
+    {'command': 'npm start', 'description': 'Create React App or standard Node server'},
+    {'command': 'python3 -m http.server 3000', 'description': 'Quick static file server on port 3000'},
+    {'command': 'npx serve -s build -p 3000', 'description': 'Serve production build files'},
+    {'command': 'php -S 0.0.0.0:3000', 'description': 'PHP development server'},
+  ];
 
   @override
   void initState() {
     super.initState();
-    // Add listener to text controller for real-time button updates
-    _terminalController.addListener(() {
-      setState(() {
-        // This will trigger a rebuild when text changes
-      });
-    });
     _terminalController.addListener(_handleInputChange);
-    // Don't auto-focus on init - let user tap to show keyboard
-    
-    // Initialize liquid glass components
     _initLiquidGlassComponents();
-    
-    // Load custom shortcuts
     _loadCustomShortcuts();
+    
+    // Check if SSH is already connected and initialize terminal
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final sshService = ref.read(sshServiceProvider);
+      final tabsState = ref.read(terminalTabsProvider);
+      
+      debugPrint('📱 Terminal screen initialized. SSH connected: ${sshService.isConnected}, tabs: ${tabsState.tabs.length}');
+      
+      if (sshService.isConnected && 
+          tabsState.tabs.isEmpty && 
+          !tabsState.tmuxReady && 
+          !tabsState.fallbackMode) {
+        debugPrint('🚀 SSH already connected, initializing terminal...');
+        ref.read(terminalTabsProvider.notifier).initializeTmux();
+      }
+    });
+    
+    // Listen to tab changes and update Liquid Glass tab bar
+    ref.listenManual(terminalTabsProvider, (previous, next) {
+      if (_liquidGlassTabBarShown) {
+        if (previous != null) {
+          final tabCountChanged = previous.tabs.length != next.tabs.length;
+          final activeIndexChanged = previous.activeTabIndex != next.activeTabIndex;
+          
+          if (tabCountChanged || activeIndexChanged) {
+            debugPrint('📊 Tabs changed: count ${previous.tabs.length} → ${next.tabs.length}, active ${previous.activeTabIndex} → ${next.activeTabIndex}');
+            // Delay update to avoid recreating view while button is still being pressed
+            Future.delayed(const Duration(milliseconds: 300), () {
+              if (mounted) {
+                _updateLiquidGlassTabBar();
+              }
+            });
+          }
+        }
+      }
+    });
   }
   
   Future<void> _initLiquidGlassComponents() async {
-    _liquidGlassSupported = await LiquidGlassTabBar.isSupported();
-    if (_liquidGlassSupported) {
-      // Initialize liquid glass tab bar (includes plus button)
-      await _initLiquidGlassTabBar();
-    }
+    // Initialize Liquid Glass tab bar and terminal input (iOS 26+ only)
+    await _initLiquidGlassTabBar();
+    await _initLiquidGlassTerminalInput();
   }
   
   Future<void> _initLiquidGlassTabBar() async {
-    // Set up callbacks for tab bar
     LiquidGlassTabBar.setCallbacks(
       onTabSelected: (index) {
         ref.read(terminalTabsProvider.notifier).switchToTab(index);
@@ -483,14 +551,27 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
         ref.read(terminalTabsProvider.notifier).closeTab(index);
       },
       onNewTab: () {
+        // Debounce to prevent double-tap
+        if (_isCreatingTab) {
+          debugPrint('⚠️ Tab creation already in progress, ignoring duplicate call');
+          return;
+        }
+        
         final tabsState = ref.read(terminalTabsProvider);
         if (tabsState.tabs.length < TerminalTabsNotifier.maxTabs) {
+          _isCreatingTab = true;
           ref.read(terminalTabsProvider.notifier).createNewTab();
+          
+          // Reset flag after a short delay
+          Future.delayed(const Duration(milliseconds: 500), () {
+            if (mounted) {
+              _isCreatingTab = false;
+            }
+          });
         }
       },
     );
     
-    // Show the tab bar with current tabs
     await _updateLiquidGlassTabBar();
     
     if (mounted) {
@@ -500,9 +581,59 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     }
   }
   
-  Future<void> _updateLiquidGlassTabBar() async {
-    if (!_liquidGlassSupported) return;
+  Future<void> _initLiquidGlassTerminalInput() async {
+    // Initialize callbacks
+    await LiquidGlassTerminalInput.initialize(
+      onCommandSent: (text) {
+        // Send command with newline
+        _sendCommand('\r');
+      },
+      onInputChanged: (text) {
+        // Sync text from native to Flutter controller
+        if (_terminalController.text != text) {
+          _terminalController.text = text;
+          _previousInput = text;
+          setState(() {
+            _hasText = text.trim().isNotEmpty;
+          });
+        }
+      },
+      onDismissKeyboard: () {
+        // Unfocus Flutter side
+        FocusScope.of(context).unfocus();
+      },
+      onKeyboardShow: () {
+        // Native keyboard opened
+        if (mounted) {
+          setState(() {
+            _nativeKeyboardVisible = true;
+          });
+        }
+      },
+      onKeyboardHide: () {
+        // Native keyboard closed
+        if (mounted) {
+          setState(() {
+            _nativeKeyboardVisible = false;
+          });
+        }
+      },
+    );
     
+    // Show the input
+    final shown = await LiquidGlassTerminalInput.show(
+      placeholder: 'Type commands here...',
+    );
+    
+    if (shown && mounted) {
+      setState(() {
+        _liquidGlassTerminalInputShown = true;
+      });
+      debugPrint('✅ Liquid Glass terminal input shown');
+    }
+  }
+  
+  Future<void> _updateLiquidGlassTabBar() async {
     final tabsState = ref.read(terminalTabsProvider);
     final tabs = tabsState.tabs.map((tab) => {
       'id': tab.id,
@@ -511,539 +642,127 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     
     final canAddTab = tabsState.tabs.length < TerminalTabsNotifier.maxTabs;
     
+    debugPrint('🔄 Updating Liquid Glass tab bar: ${tabs.length} tabs, active: ${tabsState.activeTabIndex}, canAdd: $canAddTab');
+    debugPrint('   Tabs: ${tabs.map((t) => t['name']).join(', ')}');
+    
     if (_liquidGlassTabBarShown) {
-      await LiquidGlassTabBar.updateTabs(
+      final result = await LiquidGlassTabBar.updateTabs(
         tabs: tabs,
         activeIndex: tabsState.activeTabIndex,
         canAddTab: canAddTab,
       );
+      debugPrint('   Update result: $result');
     } else {
-      await LiquidGlassTabBar.show(
+      final result = await LiquidGlassTabBar.show(
         tabs: tabs,
         activeIndex: tabsState.activeTabIndex,
         canAddTab: canAddTab,
       );
+      debugPrint('   Show result: $result');
     }
   }
 
   @override
   void dispose() {
     _terminalFocus.dispose();
-    _terminalController.removeListener(_handleInputChange);
     _terminalController.dispose();
-    
-    // Hide liquid glass tab bar when leaving terminal screen
     if (_liquidGlassTabBarShown) {
       LiquidGlassTabBar.hide();
     }
-    
+    if (_liquidGlassTerminalInputShown) {
+      LiquidGlassTerminalInput.hide();
+    }
     super.dispose();
   }
 
   void _handleInputChange() {
     final current = _terminalController.text;
-    final terminalService = ref.read(terminalTabsProvider).activeTab?.service;
-    if (terminalService == null) return;
-
     final oldLen = _previousInput.length;
     final newLen = current.length;
 
+    // Update button state
+    final hasText = current.trim().isNotEmpty;
+    if (hasText != _hasText) {
+      setState(() {
+        _hasText = hasText;
+      });
+    }
+
+    // Sync to Liquid Glass input if active
+    if (_liquidGlassTerminalInputShown) {
+      LiquidGlassTerminalInput.setText(current);
+    }
+
     if (newLen > oldLen) {
-      // Characters added
       final added = current.substring(oldLen);
-      terminalService.writeToShell(added);
+      ref.read(terminalTabsProvider.notifier).sendInput(added);
     } else if (newLen < oldLen) {
-      // Characters deleted (backspace)
       for (int i = 0; i < oldLen - newLen; i++) {
-        terminalService.writeToShell('\x7f'); // DEL (backspace)
+        ref.read(terminalTabsProvider.notifier).sendInput('\x7f');
       }
     }
+
     _previousInput = current;
   }
 
-  void _insertText(String text) {
-    // Add text to terminal input
-    final currentText = _terminalController.text;
-    final newText = currentText + text;
-    _terminalController.text = newText;
-
-    // Move cursor to end
-    _terminalController.selection = TextSelection.fromPosition(
-      TextPosition(offset: newText.length),
-    );
-  }
-
-  void _sendControlSequence(String sequence) {
-    // Send control sequences immediately to terminal (for ESC, CTRL, etc.)
-    final tabsState = ref.read(terminalTabsProvider);
-    final activeTab = tabsState.activeTab;
-    if (activeTab == null) return;
-
-    final terminalService = activeTab.service;
-    terminalService.writeToShell(sequence);
-  }
-
-  void _handleHistoryNavigation(String sequence) {
-    // Simply send the arrow key sequence to terminal - let the shell handle history
-    final terminalService = ref.read(terminalTabsProvider).activeTab?.service;
-    if (terminalService == null) return;
-
-    // Send arrow key directly to terminal (traditional terminal behavior)
-    terminalService.writeToShell(sequence);
-    
-    // Clear our input field since terminal is handling the history
-    _terminalController.clear();
-    _previousInput = '';
-  }
-
-  void _hideKeyboard() {
-    // Properly dismiss keyboard and remove focus
-    _terminalFocus.unfocus();
-    FocusScope.of(context).unfocus();
-
-    // Clear any text selection
-    _terminalController.selection = const TextSelection.collapsed(offset: 0);
-
-    debugPrint('DEBUG: Keyboard hidden');
-  }
-
-  void _showKeyboard() {
-    // Show keyboard by focusing the terminal
-    _terminalFocus.requestFocus();
-    debugPrint('DEBUG: Keyboard shown');
-  }
-
-  void _pasteFromClipboard() async {
+  Future<void> _loadCustomShortcuts() async {
     try {
-      final clipboardData = await Clipboard.getData(Clipboard.kTextPlain);
-      if (clipboardData?.text != null && clipboardData!.text!.isNotEmpty) {
-        // Clean the pasted text - remove newlines and format for terminal input
-        String pasteText = clipboardData.text!.trim();
-
-        // If it's a multi-line paste, just take the first line for safety
-        if (pasteText.contains('\n')) {
-          pasteText = pasteText.split('\n').first.trim();
+      final prefs = await SharedPreferences.getInstance();
+      final String? shortcutsJson = prefs.getString(_customShortcutsKey);
+      if (shortcutsJson != null && shortcutsJson.isNotEmpty) {
+        final decoded = jsonDecode(shortcutsJson);
+        if (decoded is List) {
+          setState(() {
+            _customShortcuts = List<Map<String, String>>.from(
+              decoded.map((item) => Map<String, String>.from(item as Map))
+            );
+          });
         }
-
-        // Add the text to our current input
-        final currentText = _terminalController.text;
-        final newText = currentText + pasteText;
-        _terminalController.text = newText;
-
-        // Move cursor to end
-        _terminalController.selection = TextSelection.fromPosition(
-          TextPosition(offset: newText.length),
-        );
-
-        debugPrint('DEBUG: Pasted text: "$pasteText"');
       }
     } catch (e) {
-      debugPrint('Error pasting from clipboard: $e');
+      debugPrint('Error loading custom shortcuts: $e');
+      // Reset to empty if corrupted
+      setState(() {
+        _customShortcuts = [];
+      });
     }
   }
 
-  void _copyCurrentInput() async {
-    // Copy the current input text (what user is typing)
-    final currentInput = _terminalController.text;
-
-    if (currentInput.isNotEmpty) {
-      try {
-        await Clipboard.setData(ClipboardData(text: currentInput));
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: const Text('Current input copied to clipboard',
-                style: TextStyle(color: Colors.white)),
-            backgroundColor: Colors.black,
-            behavior: SnackBarBehavior.floating,
-            duration: const Duration(seconds: 1),
-            margin: EdgeInsets.only(
-              bottom: MediaQuery.of(context).size.height - 200,
-              left: 20,
-              right: 20,
-            ),
-          ),
-        );
-        debugPrint('DEBUG: Copied current input: "$currentInput"');
-      } catch (e) {
-        debugPrint('Error copying current input: $e');
-      }
-    } else {
-      // If no current input, copy the last command from terminal output
-      _copyLastCommand();
+  Future<void> _saveCustomShortcuts() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_customShortcutsKey, jsonEncode(_customShortcuts));
+    } catch (e) {
+      debugPrint('Error saving custom shortcuts: $e');
     }
   }
 
-  void _copyLastCommand() async {
+  void _sendCommand(String command) {
     final tabsState = ref.read(terminalTabsProvider);
     final activeTab = tabsState.activeTab;
     if (activeTab == null) return;
 
-    final terminal = activeTab.terminal;
-
-    // Get the terminal content as string and find the last command
-    final terminalContent = terminal.buffer.toString();
-    final lines = terminalContent.split('\n');
-
-    String content = '';
-    for (int i = lines.length - 1; i >= 0; i--) {
-      final lineText = lines[i].trim();
-      if (lineText.isNotEmpty &&
-          !lineText.startsWith('Last login:') &&
-          lineText.contains('%')) {
-        // Found a command line, extract the command part
-        final parts = lineText.split('%');
-        if (parts.length > 1) {
-          content = parts.last.trim();
-          break;
-        }
-      }
-    }
-
-    if (content.isNotEmpty) {
-      try {
-        await Clipboard.setData(ClipboardData(text: content));
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: const Text('Last command copied to clipboard',
-                style: TextStyle(color: Colors.white)),
-            backgroundColor: Colors.black,
-            behavior: SnackBarBehavior.floating,
-            duration: const Duration(seconds: 1),
-            margin: EdgeInsets.only(
-              bottom: MediaQuery.of(context).size.height - 200,
-              left: 20,
-              right: 20,
-            ),
-          ),
-        );
-        debugPrint('DEBUG: Copied last command: "$content"');
-      } catch (e) {
-        debugPrint('Error copying last command: $e');
-      }
+    if (tabsState.fallbackMode && activeTab.shellSession != null) {
+      // Fallback mode: write directly to shell session
+      activeTab.shellSession!.write(utf8.encode('$command\r'));
+    } else {
+      // tmux mode
+      ref.read(terminalTabsProvider.notifier).sendInput('$command\r');
     }
   }
 
-  Widget _buildShortcutButton(String text, String sequence,
-      {VoidCallback? onTap, Color? color}) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 2.0),
-      child: Material(
-        color: color ?? Colors.grey[800],
-        borderRadius: BorderRadius.circular(6),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(6),
-          onTap: onTap ?? () => _insertText(sequence),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Text(
-              text,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+  void _sendKeys(String sequence) {
+    final tabsState = ref.read(terminalTabsProvider);
+    final activeTab = tabsState.activeTab;
+    if (activeTab == null) return;
 
-  Widget _buildCtrlButton(String text) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 2.0),
-      child: Material(
-        color: Colors.grey[800],
-        borderRadius: BorderRadius.circular(6),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(6),
-          onTap: () {
-            // Show a popup with Ctrl combinations
-            showDialog(
-              context: context,
-              barrierColor: Colors.transparent,
-              builder: (context) => AlertDialog(
-                backgroundColor: Colors.transparent,
-                elevation: 0,
-                contentPadding: EdgeInsets.zero,
-                insetPadding: const EdgeInsets.all(16),
-                content: SizedBox(
-                  width: double.maxFinite,
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxHeight: MediaQuery.of(context).size.height * 0.5,
-                    ),
-                    child: GridView.builder(
-                      shrinkWrap: true,
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      gridDelegate:
-                          const SliverGridDelegateWithMaxCrossAxisExtent(
-                        maxCrossAxisExtent: 320,
-                        mainAxisSpacing: 6,
-                        crossAxisSpacing: 6,
-                        childAspectRatio: 2.5,
-                      ),
-                      itemCount: _ctrlCommands.length,
-                      itemBuilder: (context, index) {
-                        final cmd = _ctrlCommands[index];
-                        return _buildCtrlOption(cmd['command']!,
-                            cmd['description']!, cmd['sequence']!);
-                      },
-                    ),
-                  ),
-                ),
-              ),
-            );
-          },
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Text(
-              text,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  // Ctrl commands list
-  static const List<Map<String, String>> _ctrlCommands = [
-    {
-      'command': 'Ctrl+C',
-      'description': 'Interrupt current command',
-      'sequence': '\x03'
-    },
-    {
-      'command': 'Ctrl+D',
-      'description': 'End of file / Exit shell',
-      'sequence': '\x04'
-    },
-    {
-      'command': 'Ctrl+Z',
-      'description': 'Suspend current process',
-      'sequence': '\x1a'
-    },
-    {
-      'command': 'Ctrl+L',
-      'description': 'Clear screen',
-      'sequence': '\x0c'
-    },
-  ];
-
-  Widget _buildCtrlOption(
-      String command, String description, String sequence) {
-    return InkWell(
-      onTap: () {
-        Navigator.of(context).pop();
-        _sendControlSequence(sequence);
-      },
-      child: Container(
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: Colors.grey[800],
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: Colors.grey[700]!, width: 1),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.start,
-          children: [
-            Text(
-              command,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
-                fontFamily: 'monospace',
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            const SizedBox(height: 4),
-            Expanded(
-              child: Text(
-                description,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 10,
-                ),
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildGitButton(String text) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 2.0),
-      child: Material(
-        color: Colors.grey[800],
-        borderRadius: BorderRadius.circular(6),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(6),
-          onTap: () {
-            // Show a popup with Git commands in two columns
-            showDialog(
-              context: context,
-              barrierColor: Colors.transparent,
-              builder: (context) => AlertDialog(
-                backgroundColor: Colors.transparent,
-                elevation: 0,
-                contentPadding: EdgeInsets.zero,
-                insetPadding: const EdgeInsets.all(16),
-                content: SizedBox(
-                  width: double.maxFinite,
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxHeight: MediaQuery.of(context).size.height * 0.5,
-                    ),
-                    child: GridView.builder(
-                      shrinkWrap: true,
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      gridDelegate:
-                          const SliverGridDelegateWithMaxCrossAxisExtent(
-                        maxCrossAxisExtent: 320,
-                        mainAxisSpacing: 6,
-                        crossAxisSpacing: 6,
-                        childAspectRatio: 2.5,
-                      ),
-                      itemCount: _gitCommands.length,
-                      itemBuilder: (context, index) {
-                        final cmd = _gitCommands[index];
-                        return _buildGitOption(
-                            cmd['command']!, cmd['description']!);
-                      },
-                    ),
-                  ),
-                ),
-              ),
-            );
-          },
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Text(
-              text,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  // Git commands list
-  static const List<Map<String, String>> _gitCommands = [
-    {
-      'command': 'git init',
-      'description': 'Start a new Git repo in the current directory.'
-    },
-    {
-      'command': 'git clone [url]',
-      'description': 'Copy a remote repository to your server.'
-    },
-    {
-      'command': 'git status',
-      'description': 'See which files are changed, staged, or untracked.'
-    },
-    {
-      'command': 'git add .',
-      'description': 'Stage all changes for the next commit.'
-    },
-    {
-      'command': 'git commit -m "message"',
-      'description': 'Save staged changes with a message.'
-    },
-    {'command': 'git push', 'description': 'Upload commits to the remote repo.'},
-    {
-      'command': 'git pull',
-      'description': 'Fetch and merge updates from the remote.'
-    },
-    {'command': 'git log', 'description': 'View the history of commits.'},
-    {'command': 'git branch', 'description': 'List all local branches.'},
-    {
-      'command': 'git checkout [branch]',
-      'description': 'Switch to a different branch.'
-    },
-    {
-      'command': 'git checkout -b [new-branch]',
-      'description': 'Create and switch to a new branch.'
-    },
-    {
-      'command': 'git merge [branch]',
-      'description': 'Merge another branch into the current one.'
-    },
-  ];
-
-  Widget _buildGitOption(String command, String description) {
-    return InkWell(
-      onTap: () {
-        Navigator.of(context).pop();
-        _insertText(command);
-
-        // Position cursor between quotes for commit message
-        if (command.contains('"message"')) {
-          final controller = _terminalController;
-          final text = controller.text;
-          final msgIndex = text.indexOf('"message"');
-          if (msgIndex != -1) {
-            controller.selection = TextSelection(
-              baseOffset: msgIndex + 1,
-              extentOffset: msgIndex + 8,
-            );
-          }
-        }
-      },
-      child: Container(
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: Colors.grey[800],
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: Colors.grey[700]!, width: 1),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.start,
-          children: [
-            Text(
-              command,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
-                fontFamily: 'monospace',
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            const SizedBox(height: 4),
-            Expanded(
-              child: Text(
-                description,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 10,
-                ),
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+    if (tabsState.fallbackMode && activeTab.shellSession != null) {
+      // Fallback mode: write directly to shell session
+      activeTab.shellSession!.write(utf8.encode(sequence));
+    } else {
+      // tmux mode
+      ref.read(terminalTabsProvider.notifier).sendInput(sequence);
+    }
   }
 
   @override
@@ -1051,54 +770,81 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     final sshService = ref.watch(sshServiceProvider);
     final tabsState = ref.watch(terminalTabsProvider);
     final activeTab = tabsState.activeTab;
-    final orientation = MediaQuery.of(context).orientation;
-    final isPortrait = orientation == Orientation.portrait;
 
     if (!sshService.isConnected) {
-      return Column(
-        children: [
-          Expanded(
-            child: Center(
-              child: Text(
-                'Connect to your server to use terminal',
-                style: TextStyle(color: Colors.grey, fontSize: 16),
-              ),
+      return Container(
+        color: const Color(0xFF0a0a0a),
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.only(top: 30),
+            child: Text(
+              'Connect to your server to use terminal',
+              style: TextStyle(color: Colors.grey[400], fontSize: 16),
             ),
           ),
-        ],
+        ),
       );
     }
 
-    if (activeTab == null) {
-      final sshService = ref.watch(sshServiceProvider);
-      final isConnected = sshService.isConnected;
-      
+    // Show loading only if neither tmux nor fallback is ready AND we have no tabs
+    if (!tabsState.tmuxReady && !tabsState.fallbackMode && activeTab == null) {
+      // Regular loading state
       return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.terminal, size: 64, color: Colors.grey),
+            const CircularProgressIndicator(
+              valueColor: AlwaysStoppedAnimation<Color>(Colors.white70),
+            ),
             const SizedBox(height: 16),
             Text(
-              isConnected 
-                ? 'No terminal tabs available'
-                : 'Connect to SSH first',
+              tabsState.statusMessage ?? 'Setting up terminal...',
               style: const TextStyle(color: Colors.grey, fontSize: 16),
+              textAlign: TextAlign.center,
             ),
-            const SizedBox(height: 24),
-            if (isConnected)
-              ElevatedButton.icon(
-                onPressed: () {
-                  ref.read(terminalTabsProvider.notifier).createNewTab();
-                },
-                icon: const Icon(Icons.add),
-                label: const Text('Create Terminal Tab'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.white.withValues(alpha:0.1),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                ),
-              ),
+          ],
+        ),
+      );
+    }
+
+    // In fallback mode, show loading until tab is created
+    if (tabsState.fallbackMode && activeTab == null) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const CircularProgressIndicator(
+              valueColor: AlwaysStoppedAnimation<Color>(Colors.white70),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Opening terminal...',
+              style: TextStyle(color: Colors.grey, fontSize: 16),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      );
+    }
+
+    // If we somehow have no active tab but should have one, show error
+    if (activeTab == null) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.error_outline, color: Colors.red, size: 48),
+            const SizedBox(height: 16),
+            const Text(
+              'Terminal not ready',
+              style: TextStyle(color: Colors.white, fontSize: 18),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              tabsState.statusMessage ?? 'Unknown error',
+              style: const TextStyle(color: Colors.grey, fontSize: 14),
+              textAlign: TextAlign.center,
+            ),
           ],
         ),
       );
@@ -1117,169 +863,51 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // Terminal tab bar (hide if liquid glass is supported)
-            if (!_liquidGlassSupported)
-              TerminalTabBar(hidePlusButton: _liquidGlassSupported),
-            
-            // Add spacing for liquid glass tab bar
-            if (_liquidGlassSupported) const SizedBox(height: 60),
+            // Spacing for liquid glass tab bar (always present on iOS 26+)
+            const SizedBox(height: 60),
 
-            // Terminal area with single TextField overlay
+            // Show tmux success banner
+            if (tabsState.statusMessage == 'tmux_success')
+              _buildSuccessBanner(),
+            
+            // Show tmux install banner if in fallback mode
+            if (tabsState.fallbackMode && tabsState.statusMessage != null && 
+                tabsState.statusMessage!.startsWith('tmux_not_installed:'))
+              _buildTmuxBanner(ref, tabsState.statusMessage!),
+
+            // Terminal display
             Expanded(
               child: Container(
-                color: Colors.black,
+                color: const Color(0xFF0a0a0a), // Match app background
                 child: Stack(
                   children: [
-                    // Terminal display with proper TerminalView
                     GestureDetector(
                       onTap: () {
-                        debugPrint('DEBUG: Terminal tapped - showing keyboard');
-                        _showKeyboard();
+                        _terminalFocus.requestFocus();
                       },
-                      child: Padding(
-                        padding: const EdgeInsets.all(8.0),
-                        child: TerminalView(
-                          key: ValueKey('terminal_${activeTab.id}_${isPortrait ? 'portrait' : 'landscape'}'),
-                          activeTab.terminal,
-                          theme: TerminalTheme(
-                            background: const Color(0xFF0a0a0a),
-                            foreground: Colors.white,
-                            cursor: Colors.white,
-                            selection: Colors.blue.withAlpha(128),
-                            black: Colors.black,
-                            red: Colors.red,
-                            green: Colors.green,
-                            yellow: Colors.yellow,
-                            blue: Colors.blue,
-                            magenta: Colors.purple,
-                            cyan: Colors.cyan,
-                            white: Colors.white,
-                            brightBlack: Colors.black87,
-                            brightRed: Colors.redAccent,
-                            brightGreen: Colors.lightGreen,
-                            brightYellow: Colors.yellowAccent,
-                            brightBlue: Colors.lightBlue,
-                            brightMagenta: Colors.pinkAccent,
-                            brightCyan: Colors.cyanAccent,
-                            brightWhite: Colors.white70,
-                            searchHitBackground: Colors.white,
-                            searchHitBackgroundCurrent: Colors.blue,
-                            searchHitForeground: Colors.black,
-                          ),
-                        ),
+                      child: TerminalView(
+                        activeTab.terminal,
+                        padding: const EdgeInsets.all(8),
+                        backgroundOpacity: 0, // Make xterm background transparent
                       ),
                     ),
-                  ],
-                ),
-              ),
-            ),
-
-            // Terminal input bar (bigger)
-            Padding(
-              padding: EdgeInsets.fromLTRB(0, 0, 0, 
-                _terminalFocus.hasFocus 
-                  ? 0 // No padding when keyboard is open (shortcuts will provide spacing)
-                  : 50  // Increased padding when keyboard is closed (to clear nav bar)
-              ),
-              child: Container(
-                width: double.infinity,
-                color: Colors.black,
-                padding: const EdgeInsets.fromLTRB(12, 12, 12, 12), // Increased padding
-                child: Row(
-                  children: [
-                    Expanded(
+                    // Invisible text field for input
+                    Positioned(
+                      left: -1000,
+                      top: -1000,
+                      width: 1,
+                      height: 1,
                       child: TextField(
                         controller: _terminalController,
                         focusNode: _terminalFocus,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 16, // Increased font size
-                          fontFamily: 'monospace',
-                          fontWeight: FontWeight.w600,
+                        autofocus: false,
+                        style: const TextStyle(color: Colors.transparent),
+                        decoration: const InputDecoration(
+                          border: InputBorder.none,
                         ),
-                        decoration: InputDecoration(
-                          hintText: 'Type commands here...',
-                          hintStyle: const TextStyle(color: Colors.grey, fontSize: 16), // Increased hint size
-                          filled: true,
-                          fillColor: Colors.black,
-                          contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 16), // Increased padding
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(25), // Fully rounded
-                            borderSide: BorderSide(
-                                color: Colors.white.withAlpha(51), width: 1.2),
-                          ),
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(25), // Fully rounded
-                            borderSide: BorderSide(
-                                color: Colors.white.withAlpha(51), width: 1.2),
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(25), // Fully rounded
-                            borderSide: BorderSide(
-                                color: Colors.white.withAlpha(102),
-                                width: 1.8),
-                          ),
-                          prefixIcon: IconButton(
-                            icon: const Icon(
-                              CupertinoIcons.keyboard_chevron_compact_down,
-                              color: Colors.white,
-                              size: 24, // Increased icon size
-                            ),
-                            onPressed: () {
-                              debugPrint('DEBUG: Hide keyboard icon pressed');
-                              _hideKeyboard();
-                            },
-                            splashRadius: 20,
-                          ),
-                          suffixIcon: Container(
-                            margin: const EdgeInsets.only(right: 8),
-                            width: 32, // Smaller button
-                            height: 32, // Smaller button
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                color: _terminalController.text.trim().isNotEmpty 
-                                    ? Colors.blue.withAlpha(204) // Highlight when text available
-                                    : Colors.white.withAlpha(51), // Dim when empty
-                                width: 1.5,
-                              ),
-                              color: _terminalController.text.trim().isNotEmpty 
-                                  ? Colors.blue.withAlpha(25) // Subtle background when text available
-                                  : Colors.transparent, // Transparent when empty
-                            ),
-                            child: IconButton(
-                              icon: Icon(
-                                CupertinoIcons.arrow_up,
-                                color: _terminalController.text.trim().isNotEmpty 
-                                    ? Colors.blue // Blue when text available
-                                    : Colors.white.withAlpha(102), // Dim when empty
-                                size: 18, // Bigger icon relative to button
-                              ),
-                              onPressed: _terminalController.text.trim().isNotEmpty ? () {
-                                final terminalService = activeTab.service;
-                                // Always send Enter (return key) regardless of input content
-                                terminalService.writeToShell('\r');
-                                // Clear input and reset previous input
-                                _terminalController.clear();
-                                _previousInput = '';
-                                // Hide keyboard for better UX
-                                _hideKeyboard();
-                              } : null, // Disabled when no text
-                              splashRadius: 16, // Smaller splash radius
-                            ),
-                          ),
-                        ),
-                        onSubmitted: (value) {
-                          final terminalService = activeTab.service;
-                          // Always send Enter (return key) regardless of input content
-                          terminalService.writeToShell('\r');
-                          // Clear input and reset previous input
-                          _terminalController.clear();
-                          _previousInput = '';
-                          // Hide keyboard for better UX
-                          _hideKeyboard();
-                        },
+                        keyboardType: TextInputType.text,
+                        // Use newline action on iOS, none on other platforms
+                        textInputAction: TextInputAction.newline,
                       ),
                     ),
                   ],
@@ -1287,561 +915,506 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
               ),
             ),
 
-            // Keyboard shortcuts row (only show when keyboard is open)
-            if (_terminalFocus.hasFocus) ...[
-              Container(
-                height: isPortrait ? 40 : 50,
-                color: Colors.grey[900],
+            // Keyboard shortcuts - sits above input (Flutter or Liquid Glass)
+            Padding(
+              padding: EdgeInsets.only(
+                bottom: _liquidGlassTerminalInputShown 
+                  ? (_nativeKeyboardVisible ? 60 : 110)  // 60px when keyboard open, 110px when closed
+                  : 0,
+              ),
+              child: Container(
+                color: Colors.black,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
                 child: SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 8.0),
                   child: Row(
                     children: [
-                      // Control shortcuts first
-                      _buildShortcutButton('esc', '\x1b',
-                          onTap: () => _sendControlSequence('\x1b')),
-
-                      // Copy and Paste buttons
-                      _buildShortcutButton('cpy', '', onTap: () {
-                        debugPrint(
-                            'DEBUG: Copy button pressed - copying current input');
-                        _copyCurrentInput();
-                      }),
-
-                      _buildShortcutButton('pste', '', onTap: () {
-                        debugPrint('DEBUG: Paste button pressed');
-                        _pasteFromClipboard();
-                      }),
-
-                      _buildCtrlButton('ctrl'),
-
-                      // Navigation shortcuts
-                      _buildShortcutButton('↑', '\x1b[A',
-                          onTap: () => _handleHistoryNavigation('\x1b[A')),
-                      _buildShortcutButton('↓', '\x1b[B',
-                          onTap: () => _handleHistoryNavigation('\x1b[B')),
-                      _buildShortcutButton('←', '\x1b[D',
-                          onTap: () => _sendControlSequence('\x1b[D')),
-                      _buildShortcutButton('→', '\x1b[C',
-                          onTap: () => _sendControlSequence('\x1b[C')),
                       _buildShortcutButton('tab', '\t'),
-
-                      // Common symbols
-                      _buildGitButton('git'),
-                      _buildServerButton('srvr'),
-                      _buildFlutterButton('fltr'),
-                      _buildBackupButton('bkup'),
+                      _buildShortcutButton('esc', '\x1b'),
+                      _buildShortcutButton('↑', '\x1b[A'),
+                      _buildShortcutButton('↓', '\x1b[B'),
+                      _buildShortcutButton('←', '\x1b[D'),
+                      _buildShortcutButton('→', '\x1b[C'),
+                      _buildServerButton(),
+                      _buildBackupButton(),
                       _buildCustomButton('cstm'),
                     ],
                   ),
                 ),
               ),
-            ],
+            ),
+
+            // Terminal input bar - only show if Liquid Glass is not supported
+            if (!_liquidGlassTerminalInputShown)
+              Padding(
+              padding: EdgeInsets.fromLTRB(0, 0, 0, 
+                _terminalFocus.hasFocus 
+                  ? 0  // No padding when keyboard is open
+                  : 50 // Extra padding when keyboard is closed (clears nav bar)
+              ),
+              child: Container(
+                width: double.infinity,
+                color: Colors.black,
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+                child: TextField(
+                  controller: _terminalController,
+                  focusNode: _terminalFocus,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontFamily: 'monospace',
+                    fontWeight: FontWeight.w600,
+                  ),
+                  decoration: InputDecoration(
+                    hintText: 'Type commands here...',
+                    hintStyle: const TextStyle(color: Colors.grey, fontSize: 16),
+                    filled: true,
+                    fillColor: Colors.black,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 16,
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(25),
+                      borderSide: BorderSide(
+                        color: Colors.white.withAlpha(51),
+                        width: 1.2,
+                      ),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(25),
+                      borderSide: BorderSide(
+                        color: Colors.white.withAlpha(51),
+                        width: 1.2,
+                      ),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(25),
+                      borderSide: BorderSide(
+                        color: Colors.white.withAlpha(102),
+                        width: 1.8,
+                      ),
+                    ),
+                    prefixIcon: IconButton(
+                      icon: const Icon(
+                        CupertinoIcons.keyboard_chevron_compact_down,
+                        color: Colors.white,
+                        size: 24,
+                      ),
+                      onPressed: () {
+                        FocusScope.of(context).unfocus();
+                      },
+                      splashRadius: 20,
+                    ),
+                    suffixIcon: Container(
+                      margin: const EdgeInsets.only(right: 4),
+                      child: IconButton(
+                        icon: Container(
+                          width: 36,
+                          height: 36,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: _hasText 
+                              ? Colors.blue
+                              : Colors.grey.withAlpha(77),
+                          ),
+                          child: Icon(
+                            CupertinoIcons.arrow_up,
+                            color: _hasText 
+                              ? Colors.white
+                              : Colors.grey.withAlpha(153),
+                            size: 20,
+                          ),
+                        ),
+                        onPressed: _hasText
+                          ? () {
+                              _sendCommand('\r');
+                              _terminalController.clear();
+                              _previousInput = '';
+                              setState(() {
+                                _hasText = false;
+                              });
+                              FocusScope.of(context).unfocus();
+                            }
+                          : null,
+                        splashRadius: 24,
+                      ),
+                    ),
+                  ),
+                  onSubmitted: (value) {
+                    _sendCommand('\r');
+                    _terminalController.clear();
+                    _previousInput = '';
+                    FocusScope.of(context).unfocus();
+                  },
+                ),
+              ),
+            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildServerButton(String text) {
+  Widget _buildSuccessBanner() {
     return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 2.0),
-      child: Material(
-        color: Colors.grey[800],
-        borderRadius: BorderRadius.circular(6),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(6),
-          onTap: () {
-            // Show a popup with Server commands in two columns
-            showDialog(
-              context: context,
-              barrierColor: Colors.transparent,
-              builder: (context) => AlertDialog(
-                backgroundColor: Colors.transparent,
-                elevation: 0,
-                contentPadding: EdgeInsets.zero,
-                insetPadding: const EdgeInsets.all(16),
-                content: SizedBox(
-                  width: double.maxFinite,
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxHeight: MediaQuery.of(context).size.height * 0.5,
-                    ),
-                    child: GridView.builder(
-                      shrinkWrap: true,
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      gridDelegate:
-                          const SliverGridDelegateWithMaxCrossAxisExtent(
-                        maxCrossAxisExtent: 320,
-                        mainAxisSpacing: 6,
-                        crossAxisSpacing: 6,
-                        childAspectRatio: 2.5,
-                      ),
-                      itemCount: _serverCommands.length,
-                      itemBuilder: (context, index) {
-                        final cmd = _serverCommands[index];
-                        return _buildServerOption(
-                            cmd['command']!, cmd['description']!);
-                      },
-                    ),
-                  ),
-                ),
-              ),
-            );
-          },
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      color: Colors.green[700],
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: [
+          const Icon(Icons.check_circle, color: Colors.white, size: 20),
+          const SizedBox(width: 12),
+          const Expanded(
             child: Text(
-              text,
-              style: const TextStyle(
+              '✨ Persistent sessions enabled!',
+              style: TextStyle(
                 color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
+                fontWeight: FontWeight.bold,
+                fontSize: 13,
               ),
             ),
           ),
-        ),
+          IconButton(
+            onPressed: () {
+              ref.read(terminalTabsProvider.notifier).clearStatusMessage();
+            },
+            icon: const Icon(
+              Icons.close,
+              color: Colors.white,
+              size: 20,
+            ),
+            splashRadius: 20,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+          ),
+        ],
       ),
     );
   }
 
-  // Web dev server commands - optimized for preview screen
-  static const List<Map<String, String>> _serverCommands = [
-    {
-      'command': 'npm run dev',
-      'description': 'Vite, Next.js, or other modern dev server'
-    },
-    {
-      'command': 'npm start',
-      'description': 'Create React App or standard Node server'
-    },
-    {
-      'command': 'python3 -m http.server 3000',
-      'description': 'Quick static file server on port 3000'
-    },
-    {
-      'command': 'npx serve -s build -p 3000',
-      'description': 'Serve production build files'
-    },
-    {
-      'command': 'php -S 0.0.0.0:3000',
-      'description': 'PHP development server'
-    },
-  ];
-
-  Widget _buildServerOption(String command, String description) {
-    return InkWell(
-      onTap: () {
-        Navigator.of(context).pop();
-        _insertText(command);
-      },
-      child: Container(
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: Colors.grey[800],
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: Colors.grey[700]!, width: 1),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.start,
-          children: [
-            Text(
-              command,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
-                fontFamily: 'monospace',
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            const SizedBox(height: 4),
-            Expanded(
-              child: Text(
-                description,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 10,
-                ),
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
-      ),
+  Widget _buildTmuxBanner(WidgetRef ref, String statusMessage) {
+    final osTypeName = statusMessage.split(':')[1];
+    final osType = TmuxCheckResult.values.firstWhere(
+      (e) => e.name == osTypeName,
+      orElse: () => TmuxCheckResult.notInstalledUnknown,
     );
-  }
 
-  Widget _buildBackupButton(String text) {
     return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 2.0),
-      child: Material(
-        color: Colors.grey[800],
-        borderRadius: BorderRadius.circular(6),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(6),
-          onTap: () {
-            // Show a popup with Backup commands matching git/server style
-            showDialog(
-              context: context,
-              barrierColor: Colors.transparent,
-              builder: (context) => AlertDialog(
-                backgroundColor: Colors.transparent,
-                elevation: 0,
-                contentPadding: EdgeInsets.zero,
-                insetPadding: const EdgeInsets.all(16),
-                content: SizedBox(
-                  width: double.maxFinite,
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxHeight: MediaQuery.of(context).size.height * 0.5,
-                    ),
-                    child: GridView.builder(
-                      shrinkWrap: true,
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      gridDelegate:
-                          const SliverGridDelegateWithMaxCrossAxisExtent(
-                        maxCrossAxisExtent: 320,
-                        mainAxisSpacing: 6,
-                        crossAxisSpacing: 6,
-                        childAspectRatio: 2.5,
-                      ),
-                      itemCount: _backupCommands.length,
-                      itemBuilder: (context, index) {
-                        final cmd = _backupCommands[index];
-                        return _buildBackupOption(
-                            cmd['command']!, cmd['description']!);
-                      },
-                    ),
+      color: Colors.orange[900],
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
+        children: [
+          const Icon(Icons.info_outline, color: Colors.white, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Install tmux for persistent sessions',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
                   ),
                 ),
-              ),
-            );
-          },
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Text(
-              text,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildFlutterButton(String text) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 2.0),
-      child: Material(
-        color: Colors.grey[800],
-        borderRadius: BorderRadius.circular(6),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(6),
-          onTap: () {
-            // Show a popup with Flutter commands
-            showDialog(
-              context: context,
-              barrierColor: Colors.transparent,
-              builder: (context) => AlertDialog(
-                backgroundColor: Colors.transparent,
-                elevation: 0,
-                contentPadding: EdgeInsets.zero,
-                insetPadding: const EdgeInsets.all(16),
-                content: SizedBox(
-                  width: double.maxFinite,
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxHeight: MediaQuery.of(context).size.height * 0.5,
-                    ),
-                    child: GridView.builder(
-                      shrinkWrap: true,
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      gridDelegate:
-                          const SliverGridDelegateWithMaxCrossAxisExtent(
-                        maxCrossAxisExtent: 320,
-                        mainAxisSpacing: 6,
-                        crossAxisSpacing: 6,
-                        childAspectRatio: 2.5,
-                      ),
-                      itemCount: _flutterCommands.length,
-                      itemBuilder: (context, index) {
-                        final cmd = _flutterCommands[index];
-                        return _buildFlutterOption(
-                            cmd['command']!, cmd['description']!);
-                      },
-                    ),
+                const SizedBox(height: 2),
+                Text(
+                  'Type: ${_getTmuxInstallCommand(osType)}',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 11,
+                    fontFamily: 'monospace',
                   ),
                 ),
-              ),
-            );
-          },
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Text(
-              text,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-              ),
+              ],
             ),
           ),
-        ),
+          IconButton(
+            onPressed: () {
+              ref.read(terminalTabsProvider.notifier).initializeTmux();
+            },
+            icon: const Icon(
+              CupertinoIcons.refresh,
+              color: Colors.white,
+              size: 20,
+            ),
+            splashRadius: 20,
+          ),
+        ],
       ),
     );
   }
 
-  // Backup commands list
-  static const List<Map<String, String>> _backupCommands = [
-    {
-      'command': 'cp -r . ../project_name_backup',
-      'description': 'Create backup in parent directory'
-    },
-    {
-      'command': 'tar -czf ../project_backup.tar.gz .',
-      'description': 'Create compressed backup archive'
-    },
-    {
-      'command': 'rsync -av . ../project_backup/',
-      'description': 'Sync backup with rsync'
-    },
-    {
-      'command': 'zip -r ../project_backup.zip . -x "node_modules/*" ".git/*"',
-      'description': 'Create zip backup (exclude common folders)'
-    },
-  ];
-
-  Widget _buildBackupOption(String command, String description) {
-    return InkWell(
-      onTap: () {
-        Navigator.of(context).pop();
-        _insertText(command);
-      },
-      child: Container(
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: Colors.grey[800],
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: Colors.grey[700]!, width: 1),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.start,
-          children: [
-            Text(
-              command,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
-                fontFamily: 'monospace',
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            const SizedBox(height: 4),
-            Expanded(
-              child: Text(
-                description,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 10,
-                ),
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // Flutter commands list
-  static const List<Map<String, String>> _flutterCommands = [
-    {
-      'command': 'flutter run',
-      'description': 'Run the Flutter app on connected device'
-    },
-    {
-      'command': 'flutter run -d web-server --web-port=3000 --web-hostname=0.0.0.0',
-      'description': 'Run Flutter web app accessible from mobile'
-    },
-    {
-      'command': 'flutter build web',
-      'description': 'Build Flutter app for web deployment'
-    },
-    {
-      'command': 'flutter build apk',
-      'description': 'Build Android APK'
-    },
-    {
-      'command': 'flutter build ios',
-      'description': 'Build iOS app (requires Xcode)'
-    },
-    {
-      'command': 'flutter pub get',
-      'description': 'Get dependencies from pubspec.yaml'
-    },
-    {
-      'command': 'flutter pub add',
-      'description': 'Add a new dependency (add package name)'
-    },
-    {
-      'command': 'flutter clean',
-      'description': 'Clean build cache and artifacts'
-    },
-    {
-      'command': 'flutter doctor',
-      'description': 'Check Flutter installation and setup'
-    },
-    {
-      'command': 'flutter devices',
-      'description': 'List connected devices'
-    },
-    {
-      'command': 'flutter create new_project',
-      'description': 'Create a new Flutter project'
-    },
-    {
-      'command': 'flutter analyze',
-      'description': 'Analyze Dart code for issues'
-    },
-  ];
-
-  Widget _buildFlutterOption(String command, String description) {
-    return InkWell(
-      onTap: () {
-        Navigator.of(context).pop();
-        _insertText(command);
-      },
-      child: Container(
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: Colors.grey[800],
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: Colors.grey[700]!, width: 1),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.start,
-          children: [
-            Text(
-              command,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
-                fontFamily: 'monospace',
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            const SizedBox(height: 4),
-            Expanded(
-              child: Text(
-                description,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 10,
-                ),
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // Custom shortcuts methods
-  Future<void> _loadCustomShortcuts() async {
-    final prefs = await SharedPreferences.getInstance();
-    final shortcutsJson = prefs.getString(_customShortcutsKey);
-    if (shortcutsJson != null) {
-      try {
-        final List<dynamic> decoded = jsonDecode(shortcutsJson);
-        setState(() {
-          _customShortcuts = decoded
-              .map((item) => Map<String, String>.from(item as Map))
-              .toList();
-        });
-      } catch (e) {
-        debugPrint('Error loading custom shortcuts: $e');
-      }
+  String _getTmuxInstallCommand(TmuxCheckResult osType) {
+    switch (osType) {
+      case TmuxCheckResult.notInstalledUbuntu:
+        return 'sudo apt-get install tmux';
+      case TmuxCheckResult.notInstalledCentos:
+        return 'sudo yum install tmux';
+      case TmuxCheckResult.notInstalledMac:
+        return 'brew install tmux';
+      case TmuxCheckResult.notInstalledArch:
+        return 'sudo pacman -S tmux';
+      default:
+        return 'tmux (see server docs)';
     }
   }
 
-  Future<void> _saveCustomShortcuts() async {
-    final prefs = await SharedPreferences.getInstance();
-    final shortcutsJson = jsonEncode(_customShortcuts);
-    await prefs.setString(_customShortcutsKey, shortcutsJson);
-  }
-
-  Future<void> _addCustomShortcut(String title, String command) async {
-    if (_customShortcuts.length >= maxCustomShortcuts) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Maximum $maxCustomShortcuts shortcuts reached',
-              style: const TextStyle(color: Colors.white)),
-          backgroundColor: Colors.red.withAlpha(200),
-          behavior: SnackBarBehavior.floating,
-          margin: EdgeInsets.only(
-            bottom: MediaQuery.of(context).size.height - 200,
-            left: 20,
-            right: 20,
+  Widget _buildShortcutButton(String text, String sequence, {VoidCallback? onTap}) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 2.0),
+      child: Material(
+        color: Colors.grey[800],
+        borderRadius: BorderRadius.circular(6),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(6),
+          onTap: onTap ?? () => _sendKeys(sequence),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Text(
+              text,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
           ),
         ),
-      );
-      return;
-    }
-
-    setState(() {
-      _customShortcuts.add({'title': title, 'command': command});
-    });
-    await _saveCustomShortcuts();
-  }
-
-  Future<void> _editCustomShortcut(
-      int index, String title, String command) async {
-    setState(() {
-      _customShortcuts[index] = {'title': title, 'command': command};
-    });
-    await _saveCustomShortcuts();
-  }
-
-  Future<void> _deleteCustomShortcut(int index) async {
-    setState(() {
-      _customShortcuts.removeAt(index);
-    });
-    await _saveCustomShortcuts();
-  }
-
-  void _showAddEditShortcutDialog({int? editIndex}) {
-    final isEdit = editIndex != null;
-    final titleController = TextEditingController(
-      text: isEdit ? _customShortcuts[editIndex]['title'] : '',
+      ),
     );
-    final commandController = TextEditingController(
-      text: isEdit ? _customShortcuts[editIndex]['command'] : '',
+  }
+
+  Widget _buildServerButton() {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 2.0),
+      child: Material(
+        color: Colors.blue[700],
+        borderRadius: BorderRadius.circular(6),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(6),
+          onTap: () {
+            showDialog(
+              context: context,
+              builder: (context) => AlertDialog(
+                backgroundColor: const Color(0xFF1a1a1a),
+                title: const Text(
+                  'Start Web Server',
+                  style: TextStyle(color: Colors.white),
+                ),
+                content: SizedBox(
+                  width: double.maxFinite,
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: _serverCommands.length,
+                    itemBuilder: (context, index) {
+                      final cmd = _serverCommands[index];
+                      return ListTile(
+                        title: Text(
+                          cmd['command']!,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontFamily: 'monospace',
+                          ),
+                        ),
+                        subtitle: Text(
+                          cmd['description']!,
+                          style: TextStyle(color: Colors.grey[400]),
+                        ),
+                        onTap: () {
+                          Navigator.pop(context);
+                          _sendCommand(cmd['command']!);
+                        },
+                      );
+                    },
+                  ),
+                ),
+              ),
+            );
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: const Text(
+              'srvr',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ),
+      ),
     );
+  }
+
+  Widget _buildBackupButton() {
+    // Common backup/utility commands
+    final backupCommands = [
+      {'command': 'tar -czf backup.tar.gz .', 'description': 'Backup current directory'},
+      {'command': 'git add . && git commit -m "checkpoint"', 'description': 'Git checkpoint'},
+      {'command': 'npm run build', 'description': 'Build project'},
+      {'command': 'docker-compose up -d', 'description': 'Start Docker containers'},
+      {'command': 'pm2 restart all', 'description': 'Restart PM2 processes'},
+    ];
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 2.0),
+      child: Material(
+        color: Colors.green[700],
+        borderRadius: BorderRadius.circular(6),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(6),
+          onTap: () {
+            showDialog(
+              context: context,
+              builder: (context) => AlertDialog(
+                backgroundColor: const Color(0xFF1a1a1a),
+                title: const Text(
+                  'Quick Commands',
+                  style: TextStyle(color: Colors.white),
+                ),
+                content: SizedBox(
+                  width: double.maxFinite,
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: backupCommands.length,
+                    itemBuilder: (context, index) {
+                      final cmd = backupCommands[index];
+                      return ListTile(
+                        title: Text(
+                          cmd['command']!,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontFamily: 'monospace',
+                            fontSize: 13,
+                          ),
+                        ),
+                        subtitle: Text(
+                          cmd['description']!,
+                          style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                        ),
+                        onTap: () {
+                          Navigator.pop(context);
+                          _sendCommand(cmd['command']!);
+                        },
+                      );
+                    },
+                  ),
+                ),
+              ),
+            );
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: const Text(
+              'bkup',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCustomButton(String label) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 2.0),
+      child: Material(
+        color: Colors.grey[800],
+        borderRadius: BorderRadius.circular(6),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(6),
+          onTap: () {
+            // Show custom shortcuts dialog
+            showDialog(
+              context: context,
+              builder: (context) => AlertDialog(
+                backgroundColor: const Color(0xFF1a1a1a),
+                title: const Text(
+                  'Custom Shortcuts',
+                  style: TextStyle(color: Colors.white),
+                ),
+                content: SizedBox(
+                  width: double.maxFinite,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ..._customShortcuts.map((shortcut) => ListTile(
+                        title: Text(
+                          shortcut['title']!,
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                        subtitle: Text(
+                          shortcut['command']!,
+                          style: TextStyle(color: Colors.grey[400]),
+                        ),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red),
+                          onPressed: () {
+                            setState(() {
+                              _customShortcuts.remove(shortcut);
+                            });
+                            _saveCustomShortcuts();
+                            Navigator.pop(context);
+                          },
+                        ),
+                        onTap: () {
+                          Navigator.pop(context);
+                          _sendCommand(shortcut['command']!);
+                        },
+                      )),
+                      if (_customShortcuts.length < maxCustomShortcuts)
+                        ListTile(
+                          leading: const Icon(Icons.add, color: Colors.blue),
+                          title: const Text(
+                            'Add Custom Shortcut',
+                            style: TextStyle(color: Colors.blue),
+                          ),
+                          onTap: () {
+                            Navigator.pop(context);
+                            _showAddShortcutDialog();
+                          },
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showAddShortcutDialog() {
+    final titleController = TextEditingController();
+    final commandController = TextEditingController();
 
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: Colors.grey[900],
-        title: Text(
-          isEdit ? 'Edit Shortcut' : 'Add Shortcut',
-          style: const TextStyle(color: Colors.white),
+        backgroundColor: const Color(0xFF1a1a1a),
+        title: const Text(
+          'New Custom Shortcut',
+          style: TextStyle(color: Colors.white),
         ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1851,282 +1424,42 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
               style: const TextStyle(color: Colors.white),
               decoration: InputDecoration(
                 labelText: 'Title',
-                labelStyle: const TextStyle(color: Colors.white70),
-                enabledBorder: OutlineInputBorder(
-                  borderSide: BorderSide(color: Colors.grey[700]!),
-                ),
-                focusedBorder: const OutlineInputBorder(
-                  borderSide: BorderSide(color: Colors.white),
-                ),
+                labelStyle: TextStyle(color: Colors.grey[400]),
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 16),
             TextField(
               controller: commandController,
               style: const TextStyle(color: Colors.white),
-              maxLines: 3,
               decoration: InputDecoration(
                 labelText: 'Command',
-                labelStyle: const TextStyle(color: Colors.white70),
-                enabledBorder: OutlineInputBorder(
-                  borderSide: BorderSide(color: Colors.grey[700]!),
-                ),
-                focusedBorder: const OutlineInputBorder(
-                  borderSide: BorderSide(color: Colors.white),
-                ),
+                labelStyle: TextStyle(color: Colors.grey[400]),
               ),
             ),
           ],
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel', style: TextStyle(color: Colors.white70)),
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
           ),
           TextButton(
             onPressed: () {
-              final title = titleController.text.trim();
-              final command = commandController.text.trim();
-              if (title.isNotEmpty && command.isNotEmpty) {
-                if (isEdit) {
-                  _editCustomShortcut(editIndex, title, command);
-                } else {
-                  _addCustomShortcut(title, command);
-                }
-                Navigator.of(context).pop();
+              if (titleController.text.isNotEmpty &&
+                  commandController.text.isNotEmpty) {
+                setState(() {
+                  _customShortcuts.add({
+                    'title': titleController.text,
+                    'command': commandController.text,
+                  });
+                });
+                _saveCustomShortcuts();
+                Navigator.pop(context);
               }
             },
-            child: Text(
-              isEdit ? 'Save' : 'Add',
-              style: const TextStyle(color: Colors.white),
-            ),
+            child: const Text('Add'),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildCustomButton(String text) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 2.0),
-      child: Material(
-        color: Colors.grey[800],
-        borderRadius: BorderRadius.circular(6),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(6),
-          onTap: () {
-            // Show popup with custom shortcuts
-            showDialog(
-              context: context,
-              barrierColor: Colors.transparent,
-              builder: (context) => AlertDialog(
-                backgroundColor: Colors.transparent,
-                elevation: 0,
-                contentPadding: EdgeInsets.zero,
-                insetPadding: const EdgeInsets.all(16),
-                content: SizedBox(
-                  width: double.maxFinite,
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxHeight: MediaQuery.of(context).size.height * 0.5,
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        // Add new shortcut button
-                        if (_customShortcuts.length < maxCustomShortcuts)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 6),
-                            child: InkWell(
-                              onTap: () {
-                                Navigator.of(context).pop();
-                                _showAddEditShortcutDialog();
-                              },
-                              child: Container(
-                                padding: const EdgeInsets.all(12),
-                                decoration: BoxDecoration(
-                                  color: Colors.blue[700],
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
-                                child: const Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    Icon(Icons.add, color: Colors.white, size: 18),
-                                    SizedBox(width: 8),
-                                    Text(
-                                      'Add Custom Shortcut',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        // Custom shortcuts list
-                        Expanded(
-                          child: _customShortcuts.isEmpty
-                              ? Center(
-                                  child: Text(
-                                    'No custom shortcuts yet.\nTap "Add Custom Shortcut" to create one.',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(
-                                      color: Colors.grey[400],
-                                      fontSize: 14,
-                                    ),
-                                  ),
-                                )
-                              : GridView.builder(
-                                  shrinkWrap: true,
-                                  physics: const AlwaysScrollableScrollPhysics(),
-                                  gridDelegate:
-                                      const SliverGridDelegateWithMaxCrossAxisExtent(
-                                    maxCrossAxisExtent: 320,
-                                    mainAxisSpacing: 6,
-                                    crossAxisSpacing: 6,
-                                    childAspectRatio: 2.5,
-                                  ),
-                                  itemCount: _customShortcuts.length,
-                                  itemBuilder: (context, index) {
-                                    final shortcut = _customShortcuts[index];
-                                    return _buildCustomShortcutOption(
-                                      shortcut['title']!,
-                                      shortcut['command']!,
-                                      index,
-                                    );
-                                  },
-                                ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            );
-          },
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Text(
-              text,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCustomShortcutOption(String title, String command, int index) {
-    return InkWell(
-      onTap: () {
-        Navigator.of(context).pop();
-        _insertText(command);
-      },
-      onLongPress: () {
-        // Show edit/delete options on long press
-        Navigator.of(context).pop();
-        showDialog(
-          context: context,
-          builder: (context) => AlertDialog(
-            backgroundColor: Colors.grey[900],
-            title: Text(
-              title,
-              style: const TextStyle(color: Colors.white),
-            ),
-            content: Text(
-              command,
-              style: const TextStyle(
-                color: Colors.white70,
-                fontFamily: 'monospace',
-                fontSize: 12,
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  Navigator.of(context).pop();
-                  _showAddEditShortcutDialog(editIndex: index);
-                },
-                child: const Text(
-                  'Edit',
-                  style: TextStyle(color: Colors.blue),
-                ),
-              ),
-              TextButton(
-                onPressed: () {
-                  Navigator.of(context).pop();
-                  _deleteCustomShortcut(index);
-                },
-                child: const Text(
-                  'Delete',
-                  style: TextStyle(color: Colors.red),
-                ),
-              ),
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text(
-                  'Cancel',
-                  style: TextStyle(color: Colors.white70),
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-      child: Container(
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: Colors.grey[800],
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: Colors.grey[700]!, width: 1),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    title,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                const Icon(
-                  Icons.more_vert,
-                  color: Colors.white70,
-                  size: 16,
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Expanded(
-              child: Text(
-                command,
-                style: const TextStyle(
-                  color: Colors.white70,
-                  fontSize: 10,
-                  fontFamily: 'monospace',
-                ),
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }
