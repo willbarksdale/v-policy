@@ -846,6 +846,15 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
         if (_liquidGlassPowerButtonShown) {
           await LiquidGlassPowerButton.updateState(isConnected: true);
         }
+        
+        // Auto-navigate to Terminal screen after successful connection
+        if (mounted) {
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (context) => const TerminalScreen(),
+            ),
+          );
+        }
       } catch (e) {
         // Provide more specific error messages
         String errorMessage = 'Failed to connect';

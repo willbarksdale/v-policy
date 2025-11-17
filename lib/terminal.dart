@@ -477,6 +477,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
   bool _liquidGlassTerminalInputShown = false;
   bool _nativeKeyboardVisible = false;  // Track native iOS keyboard state
   bool _isCreatingTab = false;  // Debounce flag for tab creation
+  bool _liquidGlassPowerButtonShown = false;
+  bool _liquidGlassInfoButtonShown = false;
+  bool _isDisconnecting = false;  // Prevent multiple disconnect dialogs
   
   // Custom shortcuts
   List<Map<String, String>> _customShortcuts = [];
@@ -497,6 +500,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     super.initState();
     _terminalController.addListener(_handleInputChange);
     _initLiquidGlassComponents();
+    _initLiquidGlassButtons();
     _loadCustomShortcuts();
     
     // Check if SSH is already connected and initialize terminal
@@ -667,6 +671,126 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       debugPrint('   Show result: $result');
     }
   }
+  
+  Future<void> _initLiquidGlassButtons() async {
+    // Initialize Power button
+    await _initLiquidGlassPowerButton();
+    
+    // Initialize Info button
+    await _initLiquidGlassInfoButton();
+  }
+  
+  Future<void> _initLiquidGlassPowerButton() async {
+    // Set up callback for power button taps (disconnect from terminal)
+    LiquidGlassPowerButton.setOnPowerButtonTappedCallback(() {
+      _handlePowerButtonTap();
+    });
+    
+    // Show the power button in connected state (blue)
+    final shown = await LiquidGlassPowerButton.show(isConnected: true);
+    
+    if (shown && mounted) {
+      setState(() {
+        _liquidGlassPowerButtonShown = true;
+      });
+    }
+  }
+  
+  Future<void> _initLiquidGlassInfoButton() async {
+    // Set up callback for info button taps
+    LiquidGlassInfoButton.setOnInfoButtonTappedCallback(() async {
+      // Hide buttons before navigating
+      await LiquidGlassPowerButton.hide();
+      await LiquidGlassInfoButton.hide();
+      
+      if (mounted) {
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (context) => const InfoScreenFullPage(),
+          ),
+        );
+        
+        // Show buttons again when returning
+        if (mounted) {
+          await LiquidGlassPowerButton.show(isConnected: true);
+          await LiquidGlassInfoButton.show();
+        }
+      }
+    });
+    
+    // Show the info button
+    final shown = await LiquidGlassInfoButton.show();
+    
+    if (shown && mounted) {
+      setState(() {
+        _liquidGlassInfoButtonShown = true;
+      });
+    }
+  }
+  
+  void _handlePowerButtonTap() {
+    // Prevent multiple dialogs
+    if (_isDisconnecting) return;
+    
+    _isDisconnecting = true;
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.black,
+        title: const Text(
+          'End session?',
+          style: TextStyle(color: Colors.white, fontSize: 20),
+          textAlign: TextAlign.center,
+        ),
+        actionsAlignment: MainAxisAlignment.center,
+        actions: [
+          IconButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _isDisconnecting = false;
+            },
+            icon: const Icon(Icons.close, color: Colors.white),
+          ),
+          IconButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await _disconnect();
+              _isDisconnecting = false;
+            },
+            icon: const Icon(Icons.check, color: Colors.white),
+          ),
+        ],
+      ),
+    ).then((_) {
+      // Ensure flag is reset even if dialog is dismissed other ways
+      _isDisconnecting = false;
+    });
+  }
+  
+  Future<void> _disconnect() async {
+    try {
+      await ref.read(sshServiceProvider.notifier).disconnect();
+      
+      // Clear connection state
+      ref.read(connectedIpProvider.notifier).state = null;
+      ref.read(connectedUsernameProvider.notifier).state = null;
+      
+      // Navigate back to SSH screen
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
+    } catch (e) {
+      debugPrint('Error disconnecting: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to disconnect: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
 
   @override
   void dispose() {
@@ -677,6 +801,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     }
     if (_liquidGlassTerminalInputShown) {
       LiquidGlassTerminalInput.hide();
+    }
+    if (_liquidGlassPowerButtonShown) {
+      LiquidGlassPowerButton.hide();
+    }
+    if (_liquidGlassInfoButtonShown) {
+      LiquidGlassInfoButton.hide();
     }
     super.dispose();
   }
