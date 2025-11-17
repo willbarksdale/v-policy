@@ -8,7 +8,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:iconify_flutter/iconify_flutter.dart';
 import 'package:iconify_flutter/icons/mdi.dart';
-import 'package:iconify_flutter/icons/material_symbols.dart';
 import 'terminal.dart';
 import 'preview.dart';
 import 'main.dart';
@@ -767,45 +766,16 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
   }
   
   void _handlePowerButtonTap() {
-    // Prevent multiple dialogs
-    if (_isDialogShowing) return;
-    
     final currentSshService = ref.read(sshServiceProvider);
     if (currentSshService.isConnected) {
-      _isDialogShowing = true;
-      showDialog(
-        context: context,
-        builder: (context) => AlertDialog(
-          backgroundColor: Colors.black,
-          title: const Text(
-            'End session?',
-            style: TextStyle(color: Colors.white, fontSize: 20),
-            textAlign: TextAlign.center,
-          ),
-          actionsAlignment: MainAxisAlignment.center,
-          actions: [
-            IconButton(
-              onPressed: () {
-                Navigator.pop(context);
-                _isDialogShowing = false;
-              },
-              icon: const Icon(Icons.close, color: Colors.white),
-            ),
-            IconButton(
-              onPressed: () {
-                Navigator.pop(context);
-                _isDialogShowing = false;
-                _disconnect();
-              },
-              icon: const Icon(Icons.check, color: Colors.white),
-            ),
-          ],
+      // Connected - Navigate to Terminal screen
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (context) => const TerminalScreen(),
         ),
-      ).then((_) {
-        // Ensure flag is reset even if dialog is dismissed other ways
-        _isDialogShowing = false;
-      });
+      );
     } else {
+      // Not connected - attempt to connect
       _connect();
     }
   }
@@ -1309,9 +1279,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   bool _useLiquidGlass = false;
 
   static final List<Widget> _widgetOptions = <Widget>[
-    const SSHSession(),
-    const TerminalScreen(),
-    const PreviewScreen(),
+    const SSHSession(),      // Index 0: SSH
+    const PreviewScreen(),   // Index 1: Preview (Terminal removed from nav)
   ];
 
   @override
@@ -1328,11 +1297,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final supported = await LiquidGlassNav.isSupported();
     if (supported) {
       await LiquidGlassNav.initialize((action) {
-        // Handle navigation from native iOS
+        // Handle navigation from native iOS (Terminal removed from nav)
         final index = switch (action) {
           'ssh' => 0,
-          'terminal' => 1,
-          'preview' => 2,
+          'preview' => 1,
           _ => 0,
         };
         setState(() {
@@ -1415,7 +1383,6 @@ class LiquidGlassBottomNav extends StatelessWidget {
   Widget build(BuildContext context) {
     final items = [
       (icon: Mdi.chevron_up, label: 'SSH'),
-      (icon: MaterialSymbols.chevron_right, label: 'Terminal'),
       (icon: Mdi.chevron_down, label: 'Preview'),
     ];
 

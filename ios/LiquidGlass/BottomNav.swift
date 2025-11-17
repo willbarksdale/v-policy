@@ -154,7 +154,7 @@ class VPolicyNativeTabBar: UIView {
             print("✅ iOS 18-25 solid tab bar enabled")
         }
         
-        // Create 3 tab items: SSH, Terminal, Preview
+        // Create 2 tab items: SSH, Preview (Terminal removed from nav)
         let sshItem = UITabBarItem(
             title: "SSH",
             image: UIImage(systemName: "antenna.radiowaves.left.and.right")?.withConfiguration(
@@ -165,27 +165,17 @@ class VPolicyNativeTabBar: UIView {
         sshItem.accessibilityLabel = "SSH"
         sshItem.accessibilityHint = "Connect to your server and set project path"
         
-        let terminalItem = UITabBarItem(
-            title: "Terminal",
-            image: UIImage(systemName: "apple.terminal")?.withConfiguration(
-                UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
-            ),
-            tag: 1
-        )
-        terminalItem.accessibilityLabel = "Terminal"
-        terminalItem.accessibilityHint = "Run commands and AI agents"
-        
         let previewItem = UITabBarItem(
             title: "Preview",
             image: UIImage(systemName: "sparkles")?.withConfiguration(
                 UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
             ),
-            tag: 2
+            tag: 1
         )
         previewItem.accessibilityLabel = "Preview"
         previewItem.accessibilityHint = "Preview web applications"
         
-        let items = [sshItem, terminalItem, previewItem]
+        let items = [sshItem, previewItem]
         tabBar.items = items
         tabBar.selectedItem = items[0]
         tabBar.delegate = self
@@ -241,8 +231,7 @@ extension VPolicyNativeTabBar: UITabBarDelegate {
         
         let action = switch newIndex {
             case 0: "ssh"
-            case 1: "terminal"
-            case 2: "preview"
+            case 1: "preview"
             default: "ssh"
         }
         
