@@ -524,12 +524,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
           
           if (tabCountChanged || activeIndexChanged) {
             debugPrint('📊 Tabs changed: count ${previous.tabs.length} → ${next.tabs.length}, active ${previous.activeTabIndex} → ${next.activeTabIndex}');
-            // Delay update to avoid recreating view while button is still being pressed
-            Future.delayed(const Duration(milliseconds: 300), () {
-              if (mounted) {
-                _updateLiquidGlassTabBar();
-              }
-            });
+            // Update immediately - debounce is handled in onNewTab callback
+            if (mounted) {
+              _updateLiquidGlassTabBar();
+            }
           }
         }
       }
@@ -551,24 +549,32 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
         ref.read(terminalTabsProvider.notifier).closeTab(index);
       },
       onNewTab: () {
-        // Debounce to prevent double-tap
+        // Simple debounce: check flag and return immediately if already creating
         if (_isCreatingTab) {
-          debugPrint('⚠️ Tab creation already in progress, ignoring duplicate call');
+          debugPrint('⚠️ Tab creation already in progress, ignoring');
           return;
         }
         
         final tabsState = ref.read(terminalTabsProvider);
-        if (tabsState.tabs.length < TerminalTabsNotifier.maxTabs) {
-          _isCreatingTab = true;
-          ref.read(terminalTabsProvider.notifier).createNewTab();
-          
-          // Reset flag after a short delay
-          Future.delayed(const Duration(milliseconds: 500), () {
-            if (mounted) {
-              _isCreatingTab = false;
-            }
-          });
+        if (tabsState.tabs.length >= TerminalTabsNotifier.maxTabs) {
+          debugPrint('⚠️ Already at max tabs, ignoring');
+          return;
         }
+        
+        // Set flag IMMEDIATELY before async call
+        _isCreatingTab = true;
+        debugPrint('🆕 Tab creation started, flag set');
+        
+        // Create tab
+        ref.read(terminalTabsProvider.notifier).createNewTab();
+        
+        // Reset flag after 1 second (generous delay)
+        Future.delayed(const Duration(milliseconds: 1000), () {
+          if (mounted) {
+            _isCreatingTab = false;
+            debugPrint('✅ Tab creation flag reset');
+          }
+        });
       },
     );
     

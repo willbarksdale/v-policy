@@ -104,8 +104,6 @@ class LiquidGlassTabBarPlugin: NSObject, FlutterPlugin {
     private var hostingController: UIHostingController<AnyView>?
     private var currentTabs: [TerminalTabInfo] = []
     private var currentActiveIndex: Int = 0
-    private var isCreatingTab: Bool = false
-    private var lastTabCreationTime: Date = Date.distantPast
     
     static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(name: "liquid_glass_tab_bar", binaryMessenger: registrar.messenger())
@@ -175,29 +173,11 @@ class LiquidGlassTabBarPlugin: NSObject, FlutterPlugin {
                     let channel = FlutterMethodChannel(name: "liquid_glass_tab_bar", binaryMessenger: flutterViewController.binaryMessenger)
                     channel.invokeMethod("onTabClosed", arguments: index)
                 },
-                onNewTab: { [weak self] in
-                    guard let self = self else { return }
-                    
-                    // Debounce: Check if we're already creating a tab or if it's too soon
-                    let now = Date()
-                    let timeSinceLastCreation = now.timeIntervalSince(self.lastTabCreationTime)
-                    
-                    if self.isCreatingTab || timeSinceLastCreation < 0.5 {
-                        print("⚠️ [Swift Plugin] Tab creation debounced (isCreating: \(self.isCreatingTab), timeSince: \(timeSinceLastCreation))")
-                        return
-                    }
-                    
-                    print("✅ [Swift Plugin] Creating new tab")
-                    self.isCreatingTab = true
-                    self.lastTabCreationTime = now
-                    
+                onNewTab: {
+                    // Simply forward to Flutter - debounce is handled on Flutter side
+                    print("➕ [Swift] New tab button tapped, forwarding to Flutter")
                     let channel = FlutterMethodChannel(name: "liquid_glass_tab_bar", binaryMessenger: flutterViewController.binaryMessenger)
                     channel.invokeMethod("onNewTab", arguments: nil)
-                    
-                    // Reset flag after delay
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        self.isCreatingTab = false
-                    }
                 },
                 canAddTab: canAddTab
             )
@@ -264,29 +244,11 @@ class LiquidGlassTabBarPlugin: NSObject, FlutterPlugin {
                     let channel = FlutterMethodChannel(name: "liquid_glass_tab_bar", binaryMessenger: flutterViewController.binaryMessenger)
                     channel.invokeMethod("onTabClosed", arguments: index)
                 },
-                onNewTab: { [weak self] in
-                    guard let self = self else { return }
-                    
-                    // Debounce: Check if we're already creating a tab or if it's too soon
-                    let now = Date()
-                    let timeSinceLastCreation = now.timeIntervalSince(self.lastTabCreationTime)
-                    
-                    if self.isCreatingTab || timeSinceLastCreation < 0.5 {
-                        print("⚠️ [Swift Plugin] Tab creation debounced (isCreating: \(self.isCreatingTab), timeSince: \(timeSinceLastCreation))")
-                        return
-                    }
-                    
-                    print("✅ [Swift Plugin] Creating new tab")
-                    self.isCreatingTab = true
-                    self.lastTabCreationTime = now
-                    
+                onNewTab: {
+                    // Simply forward to Flutter - debounce is handled on Flutter side
+                    print("➕ [Swift] New tab button tapped, forwarding to Flutter")
                     let channel = FlutterMethodChannel(name: "liquid_glass_tab_bar", binaryMessenger: flutterViewController.binaryMessenger)
                     channel.invokeMethod("onNewTab", arguments: nil)
-                    
-                    // Reset flag after delay
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        self.isCreatingTab = false
-                    }
                 },
                 canAddTab: canAddTab
             )
