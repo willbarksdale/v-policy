@@ -477,8 +477,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
   bool _liquidGlassTerminalInputShown = false;
   bool _nativeKeyboardVisible = false;  // Track native iOS keyboard state
   bool _isCreatingTab = false;  // Debounce flag for tab creation
-  bool _liquidGlassPowerButtonShown = false;
-  bool _liquidGlassInfoButtonShown = false;
   bool _isDisconnecting = false;  // Prevent multiple disconnect dialogs
   
   // Custom shortcuts
@@ -687,13 +685,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     });
     
     // Show the power button in connected state (blue)
-    final shown = await LiquidGlassPowerButton.show(isConnected: true);
-    
-    if (shown && mounted) {
-      setState(() {
-        _liquidGlassPowerButtonShown = true;
-      });
-    }
+    await LiquidGlassPowerButton.show(isConnected: true);
   }
   
   Future<void> _initLiquidGlassInfoButton() async {
@@ -719,13 +711,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     });
     
     // Show the info button
-    final shown = await LiquidGlassInfoButton.show();
-    
-    if (shown && mounted) {
-      setState(() {
-        _liquidGlassInfoButtonShown = true;
-      });
-    }
+    await LiquidGlassInfoButton.show();
   }
   
   void _handlePowerButtonTap() {
@@ -775,7 +761,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       ref.read(connectedIpProvider.notifier).state = null;
       ref.read(connectedUsernameProvider.notifier).state = null;
       
-      // Navigate back to SSH screen
+      // Update power button state to disconnected before navigating back
+      await LiquidGlassPowerButton.updateState(isConnected: false);
+      
+      // Navigate back to SSH screen (buttons will remain visible)
       if (mounted) {
         Navigator.of(context).pop();
       }
@@ -796,18 +785,18 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
   void dispose() {
     _terminalFocus.dispose();
     _terminalController.dispose();
+    
+    // Hide terminal-specific UI (tabs and input)
     if (_liquidGlassTabBarShown) {
       LiquidGlassTabBar.hide();
     }
     if (_liquidGlassTerminalInputShown) {
       LiquidGlassTerminalInput.hide();
     }
-    if (_liquidGlassPowerButtonShown) {
-      LiquidGlassPowerButton.hide();
-    }
-    if (_liquidGlassInfoButtonShown) {
-      LiquidGlassInfoButton.hide();
-    }
+    
+    // Keep Power and Info buttons visible - they persist across SSH/Terminal screens
+    // They will be managed by the SSH screen when we navigate back
+    
     super.dispose();
   }
 

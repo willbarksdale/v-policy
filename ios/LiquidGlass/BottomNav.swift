@@ -156,7 +156,7 @@ class VPolicyNativeTabBar: UIView {
         
         // Create 2 tab items: SSH, Preview (Terminal removed from nav)
         let sshItem = UITabBarItem(
-            title: "SSH",
+            title: "Terminal",
             image: UIImage(systemName: "antenna.radiowaves.left.and.right")?.withConfiguration(
                 UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
             ),

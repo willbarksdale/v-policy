@@ -677,8 +677,6 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
   late final TextEditingController _privateKeyController;
   late final TextEditingController _privateKeyPassphraseController;
   bool? _liquidGlassSupported; // null until checked
-  bool _liquidGlassPowerButtonShown = false;
-  bool _liquidGlassInfoButtonShown = false;
   bool _isDialogShowing = false;
 
   @override
@@ -719,15 +717,9 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
     
     // Show the power button with initial connection state
     final currentSshService = ref.read(sshServiceProvider);
-    final shown = await LiquidGlassPowerButton.show(
+    await LiquidGlassPowerButton.show(
       isConnected: currentSshService.isConnected,
     );
-    
-    if (shown && mounted) {
-      setState(() {
-        _liquidGlassPowerButtonShown = true;
-      });
-    }
   }
   
   Future<void> _initLiquidGlassInfoButton() async {
@@ -756,13 +748,7 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
     });
     
     // Show the info button
-    final shown = await LiquidGlassInfoButton.show();
-    
-    if (shown && mounted) {
-      setState(() {
-        _liquidGlassInfoButtonShown = true;
-      });
-    }
+    await LiquidGlassInfoButton.show();
   }
   
   void _handlePowerButtonTap() {
@@ -789,13 +775,8 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
     _privateKeyController.dispose();
     _privateKeyPassphraseController.dispose();
     
-    // Hide liquid glass buttons when leaving SSH screen
-    if (_liquidGlassPowerButtonShown) {
-      LiquidGlassPowerButton.hide();
-    }
-    if (_liquidGlassInfoButtonShown) {
-      LiquidGlassInfoButton.hide();
-    }
+    // Keep Power and Info buttons visible - they persist across SSH/Terminal screens
+    // The Terminal screen will manage their state when navigating
     
     // Do NOT disconnect here. Only dispose controllers.
     super.dispose();
@@ -843,9 +824,7 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
         ref.read(connectedUsernameProvider.notifier).state = _usernameController.text;
         
         // Update liquid glass power button state to connected (blue)
-        if (_liquidGlassPowerButtonShown) {
-          await LiquidGlassPowerButton.updateState(isConnected: true);
-        }
+        await LiquidGlassPowerButton.updateState(isConnected: true);
         
         // Auto-navigate to Terminal screen after successful connection
         if (mounted) {
@@ -904,9 +883,7 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
       ref.read(connectedUsernameProvider.notifier).state = null;
       
       // Update liquid glass power button state to disconnected
-      if (_liquidGlassPowerButtonShown) {
-        await LiquidGlassPowerButton.updateState(isConnected: false);
-      }
+      await LiquidGlassPowerButton.updateState(isConnected: false);
       
       // Force UI refresh by triggering a rebuild
       if (mounted) {
