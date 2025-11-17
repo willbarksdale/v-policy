@@ -127,7 +127,7 @@ class SimpleLiquidGlassPowerButtonPlugin: NSObject, FlutterPlugin {
             flutterViewController.addChild(hostingController)
             flutterViewController.view.addSubview(hostingController.view)
             NSLayoutConstraint.activate([
-                hostingController.view.bottomAnchor.constraint(equalTo: flutterViewController.view.safeAreaLayoutGuide.bottomAnchor, constant: -60),
+                hostingController.view.bottomAnchor.constraint(equalTo: flutterViewController.view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
                 hostingController.view.trailingAnchor.constraint(equalTo: flutterViewController.view.trailingAnchor, constant: -16),
                 hostingController.view.widthAnchor.constraint(greaterThanOrEqualToConstant: 44),
                 hostingController.view.heightAnchor.constraint(greaterThanOrEqualToConstant: 44)
@@ -245,7 +245,7 @@ class SimpleLiquidGlassInfoButtonPlugin: NSObject, FlutterPlugin {
             flutterViewController.addChild(hostingController)
             flutterViewController.view.addSubview(hostingController.view)
             NSLayoutConstraint.activate([
-                hostingController.view.bottomAnchor.constraint(equalTo: flutterViewController.view.safeAreaLayoutGuide.bottomAnchor, constant: -60),
+                hostingController.view.bottomAnchor.constraint(equalTo: flutterViewController.view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
                 hostingController.view.leadingAnchor.constraint(equalTo: flutterViewController.view.leadingAnchor, constant: 16),
                 hostingController.view.widthAnchor.constraint(greaterThanOrEqualToConstant: 44),
                 hostingController.view.heightAnchor.constraint(greaterThanOrEqualToConstant: 44)
@@ -483,7 +483,7 @@ class SimpleLiquidGlassPlayButtonPlugin: NSObject, FlutterPlugin {
             flutterViewController.addChild(hostingController)
             flutterViewController.view.addSubview(hostingController.view)
             NSLayoutConstraint.activate([
-                hostingController.view.bottomAnchor.constraint(equalTo: flutterViewController.view.safeAreaLayoutGuide.bottomAnchor, constant: -60),
+                hostingController.view.bottomAnchor.constraint(equalTo: flutterViewController.view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
                 hostingController.view.trailingAnchor.constraint(equalTo: flutterViewController.view.trailingAnchor, constant: -16),
                 hostingController.view.widthAnchor.constraint(greaterThanOrEqualToConstant: 44),
                 hostingController.view.heightAnchor.constraint(greaterThanOrEqualToConstant: 44)
