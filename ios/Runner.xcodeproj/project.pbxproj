@@ -9,7 +9,6 @@
 /* Begin PBXBuildFile section */
 		140C5A556AD4B75241C7FEEC /* Pods_RunnerTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6CF9F01409F9D869717600BE /* Pods_RunnerTests.framework */; };
 		1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */ = {isa = PBXBuildFile; fileRef = 1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */; };
-		18960C132ECAEDE5005E70A0 /* BottomNav.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18960C122ECAEDE5005E70A0 /* BottomNav.swift */; };
 		18960C162ECAEDFA005E70A0 /* Terminal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18960C142ECAEDFA005E70A0 /* Terminal.swift */; };
 		18960C172ECAEDFA005E70A0 /* Toolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18960C152ECAEDFA005E70A0 /* Toolbar.swift */; };
 		18C9D1E72EA1F3AC0002F2AA /* v copy.png in Resources */ = {isa = PBXBuildFile; fileRef = 18C9D1E62EA1F3AC0002F2AA /* v copy.png */; };
@@ -49,7 +48,6 @@
 		0A0CF9AA7D672E12B0A3D106 /* Pods-RunnerTests.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.profile.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.profile.xcconfig"; sourceTree = "<group>"; };
 		1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GeneratedPluginRegistrant.h; sourceTree = "<group>"; };
 		1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = GeneratedPluginRegistrant.m; sourceTree = "<group>"; };
-		18960C122ECAEDE5005E70A0 /* BottomNav.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BottomNav.swift; sourceTree = "<group>"; };
 		18960C142ECAEDFA005E70A0 /* Terminal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Terminal.swift; sourceTree = "<group>"; };
 		18960C152ECAEDFA005E70A0 /* Toolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Toolbar.swift; sourceTree = "<group>"; };
 		18C9D1E62EA1F3AC0002F2AA /* v copy.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "v copy.png"; sourceTree = "<group>"; };
@@ -100,7 +98,6 @@
 			children = (
 				18960C142ECAEDFA005E70A0 /* Terminal.swift */,
 				18960C152ECAEDFA005E70A0 /* Toolbar.swift */,
-				18960C122ECAEDE5005E70A0 /* BottomNav.swift */,
 			);
 			path = LiquidGlass;
 			sourceTree = "<group>";
@@ -400,7 +397,6 @@
 				18960C162ECAEDFA005E70A0 /* Terminal.swift in Sources */,
 				18960C172ECAEDFA005E70A0 /* Toolbar.swift in Sources */,
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
-				18960C132ECAEDE5005E70A0 /* BottomNav.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

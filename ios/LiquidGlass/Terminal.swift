@@ -4,299 +4,10 @@ import SwiftUI
 import Combine
 
 // ============================================================================
-// TERMINAL COMPONENTS - iOS 26+ Liquid Glass
+// TERMINAL INPUT - iOS 26+ Liquid Glass
 // ============================================================================
-// Contains both Terminal Tab Bar and Terminal Input components
+// Native iOS terminal input bar at the bottom of the terminal screen
 // ============================================================================
-
-// ============================================================================
-// MARK: - Terminal Tab Bar (Top of Screen)
-// ============================================================================
-
-struct LiquidGlassTerminalTabBar: View {
-    let tabs: [TerminalTabInfo]
-    let activeIndex: Int
-    let onTabSelected: (Int) -> Void
-    let onTabClosed: (Int) -> Void
-    let onNewTab: () -> Void
-    let canAddTab: Bool
-    @Namespace private var namespace
-    
-    var body: some View {
-        HStack(spacing: 0) {
-            // Left side: Tab buttons starting from left, populating right
-            HStack(spacing: 12) {
-                ForEach(0..<tabs.count, id: \.self) { index in
-                    if index == activeIndex {
-                        // Active tab: expanded with terminal icon and close button
-                        HStack(spacing: 6) {
-                            Button(action: { onTabSelected(index) }) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "apple.terminal")
-                                        .font(.system(size: 14, weight: .medium))
-                                    Text("\(index + 1)")
-                                        .font(.system(size: 16, weight: .semibold))
-                                }
-                                .foregroundStyle(.blue)
-                                .padding(.leading, 12)
-                            }
-                            .buttonStyle(.plain)
-                            
-                            Button(action: { onTabClosed(index) }) {
-                                Image(systemName: "xmark")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(.primary)
-                                    .frame(width: 20, height: 20)
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.trailing, 8)
-                        }
-                        .frame(height: 44)
-                        .glassEffect(.regular.interactive())
-                        .glassEffectID("tab-\(index)", in: namespace)
-                    } else {
-                        // Inactive tab: simple circular button with number
-                        Button(action: { onTabSelected(index) }) {
-                            Text("\(index + 1)")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(.primary)
-                                .frame(width: 44, height: 44)
-                        }
-                        .buttonStyle(.plain)
-                        .glassEffect(.regular.interactive())
-                        .glassEffectID("tab-\(index)", in: namespace)
-                    }
-                }
-            }
-            .padding(.leading, 16)
-            
-            Spacer()
-            
-            // Right side: Plus button fixed on the right
-            if canAddTab && tabs.count < 3 {
-                Button(action: onNewTab) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .frame(width: 44, height: 44)
-                }
-                .buttonStyle(.plain)
-                .glassEffect(.regular.interactive())
-                .glassEffectID("newTabButton", in: namespace)
-                .padding(.trailing, 16)
-            }
-        }
-        .padding(.vertical, 10)
-        .background(Color.clear)
-    }
-}
-
-// MARK: - Terminal Tab Info Model
-
-struct TerminalTabInfo: Identifiable {
-    let id: String
-    let name: String
-}
-
-// MARK: - Terminal Tab Bar Plugin
-
-class LiquidGlassTabBarPlugin: NSObject, FlutterPlugin {
-    private var hostingController: UIHostingController<AnyView>?
-    private var currentTabs: [TerminalTabInfo] = []
-    private var currentActiveIndex: Int = 0
-    
-    static func register(with registrar: FlutterPluginRegistrar) {
-        let channel = FlutterMethodChannel(name: "liquid_glass_tab_bar", binaryMessenger: registrar.messenger())
-        let instance = LiquidGlassTabBarPlugin()
-        registrar.addMethodCallDelegate(instance, channel: channel)
-    }
-    
-    func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-        print("🎯 [Swift] LiquidGlassTabBarPlugin received method call: \(call.method)")
-        
-        switch call.method {
-        case "isLiquidGlassSupported":
-            result(true)
-        case "showLiquidGlassTabBar":
-            print("   → showLiquidGlassTabBar")
-            let args = call.arguments as? [String: Any]
-                let tabsData = args?["tabs"] as? [[String: String]] ?? []
-                let activeIndex = args?["activeIndex"] as? Int ?? 0
-                let canAddTab = args?["canAddTab"] as? Bool ?? true
-                showTabBar(tabsData: tabsData, activeIndex: activeIndex, canAddTab: canAddTab, result: result)
-        case "hideLiquidGlassTabBar":
-            print("   → hideLiquidGlassTabBar")
-            hideTabBar(result: result)
-        case "updateTabs":
-            print("   → updateTabs with args: \(call.arguments ?? "nil")")
-            let args = call.arguments as? [String: Any]
-                let tabsData = args?["tabs"] as? [[String: String]] ?? []
-                let activeIndex = args?["activeIndex"] as? Int ?? 0
-                let canAddTab = args?["canAddTab"] as? Bool ?? true
-                updateTabs(tabsData: tabsData, activeIndex: activeIndex, canAddTab: canAddTab, result: result)
-            
-        default:
-            result(FlutterMethodNotImplemented)
-        }
-    }
-    
-    private func showTabBar(tabsData: [[String: String]], activeIndex: Int, canAddTab: Bool, result: @escaping FlutterResult) {
-        DispatchQueue.main.async {
-            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                  let window = windowScene.windows.first,
-                  let flutterViewController = window.rootViewController as? FlutterViewController else {
-                result(false)
-                return
-            }
-            
-            // Remove any existing tab bar
-            flutterViewController.view.subviews.filter { $0.tag == 9994 }.forEach { $0.removeFromSuperview() }
-            flutterViewController.children.forEach { child in
-                if child.view?.tag == 9994 {
-                    child.removeFromParent()
-                }
-            }
-            
-            // Convert tab data
-            self.currentTabs = tabsData.map { TerminalTabInfo(id: $0["id"] ?? "", name: $0["name"] ?? "") }
-            self.currentActiveIndex = activeIndex
-            
-            // Create liquid glass tab bar (active tab has close button)
-            let tabBar = LiquidGlassTerminalTabBar(
-                tabs: self.currentTabs,
-                activeIndex: self.currentActiveIndex,
-                onTabSelected: { index in
-                    let channel = FlutterMethodChannel(name: "liquid_glass_tab_bar", binaryMessenger: flutterViewController.binaryMessenger)
-                    channel.invokeMethod("onTabSelected", arguments: index)
-                },
-                onTabClosed: { index in
-                    let channel = FlutterMethodChannel(name: "liquid_glass_tab_bar", binaryMessenger: flutterViewController.binaryMessenger)
-                    channel.invokeMethod("onTabClosed", arguments: index)
-                },
-                onNewTab: {
-                    // Simply forward to Flutter - debounce is handled on Flutter side
-                    print("➕ [Swift] New tab button tapped, forwarding to Flutter")
-                    let channel = FlutterMethodChannel(name: "liquid_glass_tab_bar", binaryMessenger: flutterViewController.binaryMessenger)
-                    channel.invokeMethod("onNewTab", arguments: nil)
-                },
-                canAddTab: canAddTab
-            )
-            
-            let hostingController = UIHostingController(rootView: AnyView(tabBar))
-            hostingController.view.backgroundColor = UIColor.clear
-            hostingController.view.tag = 9994
-            hostingController.view.translatesAutoresizingMaskIntoConstraints = false
-            
-            flutterViewController.addChild(hostingController)
-            flutterViewController.view.addSubview(hostingController.view)
-            
-            NSLayoutConstraint.activate([
-                hostingController.view.topAnchor.constraint(equalTo: flutterViewController.view.safeAreaLayoutGuide.topAnchor),
-                hostingController.view.leadingAnchor.constraint(equalTo: flutterViewController.view.leadingAnchor),
-                hostingController.view.trailingAnchor.constraint(equalTo: flutterViewController.view.trailingAnchor),
-                // Let SwiftUI determine natural height - no fixed height constraint for "free balling" effect
-            ])
-            
-            hostingController.didMove(toParent: flutterViewController)
-            self.hostingController = hostingController
-            
-            result(true)
-        }
-    }
-    
-    private func updateTabs(tabsData: [[String: String]], activeIndex: Int, canAddTab: Bool, result: @escaping FlutterResult) {
-        print("🔄 [Swift] updateTabs called with \(tabsData.count) tabs, active: \(activeIndex), canAdd: \(canAddTab)")
-        print("   Tab data: \(tabsData)")
-        
-        DispatchQueue.main.async {
-            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                  let window = windowScene.windows.first,
-                  let flutterViewController = window.rootViewController as? FlutterViewController else {
-                print("   ❌ Failed to get Flutter view controller")
-                result(false)
-                return
-            }
-            
-            // Update tab data
-            self.currentTabs = tabsData.map { TerminalTabInfo(id: $0["id"] ?? "", name: $0["name"] ?? "") }
-            self.currentActiveIndex = activeIndex
-            
-            print("   ✅ Updated tab data: \(self.currentTabs.count) tabs")
-            print("   Tab names: \(self.currentTabs.map { $0.name }.joined(separator: ", "))")
-            
-            // Remove old tab bar
-            flutterViewController.view.subviews.filter { $0.tag == 9994 }.forEach { $0.removeFromSuperview() }
-            flutterViewController.children.forEach { child in
-                if child.view?.tag == 9994 {
-                    child.removeFromParent()
-                }
-            }
-            
-            // Recreate with new data (active tab has close button)
-            let tabBar = LiquidGlassTerminalTabBar(
-                tabs: self.currentTabs,
-                activeIndex: self.currentActiveIndex,
-                onTabSelected: { index in
-                    let channel = FlutterMethodChannel(name: "liquid_glass_tab_bar", binaryMessenger: flutterViewController.binaryMessenger)
-                    channel.invokeMethod("onTabSelected", arguments: index)
-                },
-                onTabClosed: { index in
-                    let channel = FlutterMethodChannel(name: "liquid_glass_tab_bar", binaryMessenger: flutterViewController.binaryMessenger)
-                    channel.invokeMethod("onTabClosed", arguments: index)
-                },
-                onNewTab: {
-                    // Simply forward to Flutter - debounce is handled on Flutter side
-                    print("➕ [Swift] New tab button tapped, forwarding to Flutter")
-                    let channel = FlutterMethodChannel(name: "liquid_glass_tab_bar", binaryMessenger: flutterViewController.binaryMessenger)
-                    channel.invokeMethod("onNewTab", arguments: nil)
-                },
-                canAddTab: canAddTab
-            )
-            
-            let hostingController = UIHostingController(rootView: AnyView(tabBar))
-            hostingController.view.backgroundColor = UIColor.clear
-            hostingController.view.tag = 9994
-            hostingController.view.translatesAutoresizingMaskIntoConstraints = false
-            
-            flutterViewController.addChild(hostingController)
-            flutterViewController.view.addSubview(hostingController.view)
-            
-            NSLayoutConstraint.activate([
-                hostingController.view.topAnchor.constraint(equalTo: flutterViewController.view.safeAreaLayoutGuide.topAnchor),
-                hostingController.view.leadingAnchor.constraint(equalTo: flutterViewController.view.leadingAnchor),
-                hostingController.view.trailingAnchor.constraint(equalTo: flutterViewController.view.trailingAnchor),
-                // Let SwiftUI determine natural height - no fixed height constraint for "free balling" effect
-            ])
-            
-            hostingController.didMove(toParent: flutterViewController)
-            self.hostingController = hostingController
-            
-            print("   ✅ Tab bar recreated and added to view hierarchy")
-            result(true)
-        }
-    }
-    
-    private func hideTabBar(result: @escaping FlutterResult) {
-        DispatchQueue.main.async {
-            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                  let window = windowScene.windows.first,
-                  let flutterViewController = window.rootViewController as? FlutterViewController else {
-                result(false)
-                return
-            }
-            
-            flutterViewController.view.subviews.filter { $0.tag == 9994 }.forEach { $0.removeFromSuperview() }
-            flutterViewController.children.forEach { child in
-                if child.view?.tag == 9994 {
-                    child.removeFromParent()
-                }
-            }
-            self.hostingController = nil
-            
-            result(true)
-        }
-    }
-}
 
 // ============================================================================
 // MARK: - Terminal Input Bar (Bottom of Terminal Screen)
@@ -373,7 +84,7 @@ class LiquidGlassTerminalInputPlugin: NSObject, FlutterPlugin {
         }
 
         let args = call.arguments as? [String: Any]
-        let placeholder = args?["placeholder"] as? String ?? "Type commands here..."
+        let placeholder = args?["placeholder"] as? String ?? "Type command..."
 
         // Create terminal input view model
         let viewModel = TerminalInputViewModel(
@@ -402,19 +113,17 @@ class LiquidGlassTerminalInputPlugin: NSObject, FlutterPlugin {
         window.addSubview(hosting.view)
         hosting.view.translatesAutoresizingMaskIntoConstraints = false
         
-        // Position above tab bar (matching ChatInput layout)
+        // Position at same height as Info/Power buttons (between them)
         let safeAreaBottom = window.safeAreaInsets.bottom
-        let isIPad = UIDevice.current.userInterfaceIdiom == .pad
-        let padding: CGFloat = isIPad ? 20 : 0
-        let bottomOffset = 55 + safeAreaBottom + padding // Distance from bottom (above nav bar)
-        let inputHeight: CGFloat = 64
+        let bottomOffset = 8 + safeAreaBottom // Same as toolbar buttons (-8 from safe area = 8 + safeAreaBottom from window bottom)
+        let inputHeight: CGFloat = 44 // Match button height for visual consistency
         
         let constraint = hosting.view.bottomAnchor.constraint(equalTo: window.bottomAnchor, constant: -bottomOffset)
         self.bottomConstraint = constraint
         
         NSLayoutConstraint.activate([
-            hosting.view.leadingAnchor.constraint(equalTo: window.leadingAnchor, constant: 20),
-            hosting.view.trailingAnchor.constraint(equalTo: window.trailingAnchor, constant: -20),
+            hosting.view.leadingAnchor.constraint(equalTo: window.leadingAnchor, constant: 20), // Standard left padding
+            hosting.view.trailingAnchor.constraint(equalTo: window.trailingAnchor, constant: -76), // 16px gap + 44px power button + 16px padding
             constraint,
             hosting.view.heightAnchor.constraint(equalToConstant: inputHeight)
         ])
@@ -624,3 +333,173 @@ struct TerminalInputView: View {
     }
 }
 
+// ============================================================================
+// MARK: - Terminal Tabs (Top of Terminal Screen)
+// ============================================================================
+
+@available(iOS 26.0, *)
+class LiquidGlassTerminalTabsPlugin: NSObject, FlutterPlugin {
+    private var hostingController: UIHostingController<TerminalTabsView>?
+    private var methodChannel: FlutterMethodChannel?
+    private var tabsState: TerminalTabsState?
+    
+    static func register(with registrar: FlutterPluginRegistrar) {
+        let channel = FlutterMethodChannel(name: "liquid_glass_terminal_tabs", binaryMessenger: registrar.messenger())
+        let instance = LiquidGlassTerminalTabsPlugin()
+        instance.methodChannel = channel
+        registrar.addMethodCallDelegate(instance, channel: channel)
+    }
+    
+    func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        switch call.method {
+        case "isLiquidGlassSupported":
+            result(true)
+        case "show":
+            let args = call.arguments as? [String: Any]
+            let activeTab = args?["activeTab"] as? Int ?? 0
+            let tabCount = args?["tabCount"] as? Int ?? 0
+            show(activeTab: activeTab, tabCount: tabCount, result: result)
+        case "hide":
+            hide(result: result)
+        case "updateTabs":
+            let args = call.arguments as? [String: Any]
+            let activeTab = args?["activeTab"] as? Int ?? 0
+            let tabCount = args?["tabCount"] as? Int ?? 0
+            updateTabs(activeTab: activeTab, tabCount: tabCount, result: result)
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+    
+    private func show(activeTab: Int, tabCount: Int, result: @escaping FlutterResult) {
+        DispatchQueue.main.async {
+            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                  let window = windowScene.windows.first,
+                  let flutterViewController = window.rootViewController as? FlutterViewController else {
+                result(false)
+                return
+            }
+            
+            // Remove existing if any
+            window.subviews.filter { $0.tag == 9994 }.forEach { $0.removeFromSuperview() }
+            
+            let state = TerminalTabsState(activeTab: activeTab, tabCount: tabCount)
+            self.tabsState = state
+            
+            let tabsView = TerminalTabsView(
+                state: state,
+                onTabTapped: { [weak self] index in
+                    self?.methodChannel?.invokeMethod("onTabTapped", arguments: ["index": index])
+                },
+                onTabLongPressed: { [weak self] index in
+                    self?.methodChannel?.invokeMethod("onTabLongPressed", arguments: ["index": index])
+                }
+            )
+            
+            let hosting = UIHostingController(rootView: tabsView)
+            hosting.view.backgroundColor = .clear
+            hosting.view.tag = 9994
+            hosting.view.translatesAutoresizingMaskIntoConstraints = false
+            
+            window.addSubview(hosting.view)
+            
+            // Position at top center
+            NSLayoutConstraint.activate([
+                hosting.view.topAnchor.constraint(equalTo: window.safeAreaLayoutGuide.topAnchor, constant: 10),
+                hosting.view.centerXAnchor.constraint(equalTo: window.centerXAnchor),
+                hosting.view.heightAnchor.constraint(equalToConstant: 44)
+            ])
+            
+            self.hostingController = hosting
+            result(true)
+        }
+    }
+    
+    private func hide(result: @escaping FlutterResult) {
+        DispatchQueue.main.async {
+            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                  let window = windowScene.windows.first else {
+                result(false)
+                return
+            }
+            
+            window.subviews.filter { $0.tag == 9994 }.forEach { $0.removeFromSuperview() }
+            self.hostingController = nil
+            result(true)
+        }
+    }
+    
+    private func updateTabs(activeTab: Int, tabCount: Int, result: @escaping FlutterResult) {
+        DispatchQueue.main.async {
+            if let state = self.tabsState {
+                state.activeTab = activeTab
+                state.tabCount = tabCount
+                result(true)
+            } else {
+                result(false)
+            }
+        }
+    }
+}
+
+// MARK: - Terminal Tabs State
+
+@available(iOS 26.0, *)
+class TerminalTabsState: ObservableObject {
+    @Published var activeTab: Int
+    @Published var tabCount: Int
+    
+    init(activeTab: Int, tabCount: Int) {
+        self.activeTab = activeTab
+        self.tabCount = tabCount
+    }
+}
+
+// MARK: - Terminal Tabs View
+
+@available(iOS 26.0, *)
+struct TerminalTabsView: View {
+    @ObservedObject var state: TerminalTabsState
+    let onTabTapped: (Int) -> Void
+    let onTabLongPressed: (Int) -> Void
+    @Namespace private var namespace
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            ForEach(0..<3, id: \.self) { index in
+                let tabExists = index < state.tabCount
+                let isActive = tabExists && index == state.activeTab
+                
+                GlassEffectContainer {
+                    ZStack {
+                        Text("\(index + 1)")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(isActive ? Color.blue : (tabExists ? Color.primary : Color.primary.opacity(0.3)))
+                            .frame(width: 44, height: 44)
+                            .allowsHitTesting(false)
+                        
+                        Color.clear
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if tabExists {
+                                    onTabTapped(index)
+                                }
+                            }
+                            .contextMenu(menuItems: {
+                                if tabExists && isActive {
+                                    Button(role: .destructive, action: {
+                                        onTabLongPressed(index)
+                                    }) {
+                                        Label("Reset Terminal \(index + 1)", systemImage: "arrow.clockwise")
+                                    }
+                                }
+                            })
+                    }
+                    .glassEffect(.regular.interactive())
+                    .glassEffectID("terminalTab\(index)", in: namespace)
+                }
+            }
+        }
+    }
+}

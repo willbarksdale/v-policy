@@ -44,6 +44,9 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Android local properties (machine-specific paths)
+/android/local.properties
+
 # iOS build artifacts
 ios/Runner.xcarchive/
 ios/ExportOptions.plist

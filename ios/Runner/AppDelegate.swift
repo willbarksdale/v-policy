@@ -10,9 +10,6 @@ import UIKit
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
     
-    // Register Liquid Glass navigation plugin
-    VPolicyLiquidGlassNavPlugin.register(with: self.registrar(forPlugin: "VPolicyLiquidGlassNavPlugin")!)
-    
     // Register Liquid Glass power button plugin
     SimpleLiquidGlassPowerButtonPlugin.register(with: self.registrar(forPlugin: "SimpleLiquidGlassPowerButtonPlugin")!)
     
@@ -25,11 +22,17 @@ import UIKit
     // Register Liquid Glass play button plugin
     SimpleLiquidGlassPlayButtonPlugin.register(with: self.registrar(forPlugin: "SimpleLiquidGlassPlayButtonPlugin")!)
     
-    // Register Liquid Glass tab bar plugin
-    LiquidGlassTabBarPlugin.register(with: self.registrar(forPlugin: "LiquidGlassTabBarPlugin")!)
+    // Register Liquid Glass history button plugin
+    SimpleLiquidGlassHistoryButtonPlugin.register(with: self.registrar(forPlugin: "SimpleLiquidGlassHistoryButtonPlugin")!)
     
     // Register Liquid Glass terminal input plugin
     LiquidGlassTerminalInputPlugin.register(with: self.registrar(forPlugin: "LiquidGlassTerminalInputPlugin")!)
+    
+    // Register Liquid Glass terminal tabs plugin
+    LiquidGlassTerminalTabsPlugin.register(with: self.registrar(forPlugin: "LiquidGlassTerminalTabsPlugin")!)
+    
+    // Register Liquid Glass URL bar plugin
+    SimpleLiquidGlassURLBarPlugin.register(with: self.registrar(forPlugin: "SimpleLiquidGlassURLBarPlugin")!)
     
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }

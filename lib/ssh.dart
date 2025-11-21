@@ -3,15 +3,173 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:iconify_flutter/iconify_flutter.dart';
-import 'package:iconify_flutter/icons/mdi.dart';
 import 'terminal.dart';
-import 'preview.dart';
 import 'main.dart';
-import 'liquid_glass.dart';
+
+// ============================================================================
+// LIQUID GLASS - SSH Components (Native iOS)
+// ============================================================================
+
+/// Power button for SSH connection control
+class LiquidGlassPowerButton {
+  static const MethodChannel _channel = MethodChannel('liquid_glass_power_button');
+  
+  static Future<bool> isSupported() async => true;
+  
+  static Future<bool> show({required bool isConnected}) async {
+    try {
+      final bool? result = await _channel.invokeMethod('enableNativeLiquidGlassPowerButton', {'isConnected': isConnected});
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error showing liquid glass power button: $e');
+      return false;
+    }
+  }
+  
+  static Future<bool> hide() async {
+    try {
+      final bool? result = await _channel.invokeMethod('disableNativeLiquidGlassPowerButton');
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error hiding liquid glass power button: $e');
+      return false;
+    }
+  }
+  
+  static Future<bool> updateState({required bool isConnected}) async {
+    try {
+      final bool? result = await _channel.invokeMethod('updatePowerButtonState', {'isConnected': isConnected});
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error updating power button state: $e');
+      return false;
+    }
+  }
+  
+  static Future<bool> showSuccessAnimation() async {
+    try {
+      final bool? result = await _channel.invokeMethod('showSuccessAnimation');
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error showing success animation: $e');
+      return false;
+    }
+  }
+  
+  static void setOnPowerButtonTappedCallback(VoidCallback callback) {
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'onPowerButtonTapped') callback();
+    });
+  }
+}
+
+/// Info button for navigation to info/help screen
+class LiquidGlassInfoButton {
+  static const MethodChannel _channel = MethodChannel('liquid_glass_info_button');
+  
+  static Future<bool> isSupported() async => true;
+  
+  static Future<bool> show() async {
+    try {
+      final bool? result = await _channel.invokeMethod('enableNativeLiquidGlassInfoButton');
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error showing liquid glass info button: $e');
+      return false;
+    }
+  }
+  
+  static Future<bool> hide() async {
+    try {
+      final bool? result = await _channel.invokeMethod('disableNativeLiquidGlassInfoButton');
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error hiding liquid glass info button: $e');
+      return false;
+    }
+  }
+  
+  static void setOnInfoButtonTappedCallback(VoidCallback callback) {
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'onInfoButtonTapped') callback();
+    });
+  }
+}
+
+/// History button to quickly load recent SSH credentials
+class LiquidGlassHistoryButton {
+  static const MethodChannel _channel = MethodChannel('liquid_glass_history_button');
+  static Function()? _onHistoryTapped;
+  
+  static Future<bool> isSupported() async => true;
+  
+  static Future<bool> show() async {
+    try {
+      final bool? result = await _channel.invokeMethod('enableNativeLiquidGlassHistoryButton');
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error showing liquid glass history button: $e');
+      return false;
+    }
+  }
+  
+  static Future<bool> hide() async {
+    try {
+      final bool? result = await _channel.invokeMethod('disableNativeLiquidGlassHistoryButton');
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error hiding liquid glass history button: $e');
+      return false;
+    }
+  }
+  
+  static void setOnHistoryTappedCallback(Function() onHistoryTapped) {
+    _onHistoryTapped = onHistoryTapped;
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'onHistoryTapped') {
+        debugPrint('🕐 History button tapped callback');
+        _onHistoryTapped?.call();
+      }
+    });
+  }
+}
+
+/// Back button for navigating back from info screen  
+class LiquidGlassBackButton {
+  static const MethodChannel _channel = MethodChannel('liquid_glass_back_button');
+  
+  static Future<bool> isSupported() async => true;
+  
+  static Future<bool> show() async {
+    try {
+      final bool? result = await _channel.invokeMethod('enableNativeLiquidGlassBackButton');
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error showing liquid glass back button: $e');
+      return false;
+    }
+  }
+  
+  static Future<bool> hide() async {
+    try {
+      final bool? result = await _channel.invokeMethod('disableNativeLiquidGlassBackButton');
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error hiding liquid glass back button: $e');
+      return false;
+    }
+  }
+  
+  static void setOnBackButtonTappedCallback(VoidCallback callback) {
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'onBackButtonTapped') callback();
+    });
+  }
+}
 
 // SshService - Simplified for better shell session management
 class SshService extends ChangeNotifier {
@@ -35,6 +193,9 @@ class SshService extends ChangeNotifier {
     debugPrint('SSH connection status: exists=$clientExists, notClosed=$notClosed');
     return clientExists && notClosed;
   }
+  
+  // Get the connected host IP
+  String? get hostIp => _lastHost;
 
   // Connect to SSH server
   Future<void> connect({
@@ -144,6 +305,110 @@ class SshService extends ChangeNotifier {
     }
   }
 
+  // Parse terminal output for server startup messages
+  static int? parseServerPortFromOutput(String output) {
+    // Common patterns for server startup messages
+    final patterns = [
+      RegExp(r'(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{4,5})', caseSensitive: false),
+      RegExp(r'port\s+(\d{4,5})', caseSensitive: false),
+      RegExp(r'running\s+(?:on|at)\s+(?:port\s+)?(\d{4,5})', caseSensitive: false),
+      RegExp(r'listening\s+on\s+(?:port\s+)?(\d{4,5})', caseSensitive: false),
+      RegExp(r'server\s+started.*?(\d{4,5})', caseSensitive: false),
+      RegExp(r'http://[^:]+:(\d{4,5})', caseSensitive: false),
+    ];
+
+    for (final pattern in patterns) {
+      final match = pattern.firstMatch(output);
+      if (match != null && match.groupCount >= 1) {
+        final portStr = match.group(1);
+        if (portStr != null) {
+          final port = int.tryParse(portStr);
+          if (port != null && port >= 1000 && port <= 65535) {
+            debugPrint('🎯 Detected server port from output: $port');
+            return port;
+          }
+        }
+      }
+    }
+    
+    return null;
+  }
+
+  // Check if a specific port is open
+  Future<bool> checkSpecificPort(int port) async {
+    if (!isConnected) return false;
+    
+    try {
+      // Try lsof first (most reliable)
+      var result = await runCommandLenient('lsof -i :$port -sTCP:LISTEN 2>/dev/null | grep LISTEN');
+      if (result != null && result.isNotEmpty && result.contains('LISTEN')) {
+        return true;
+      }
+      
+      // Try connection test
+      result = await runCommandLenient('timeout 1 bash -c "echo >/dev/tcp/localhost/$port" 2>&1 && echo "OPEN" || echo "CLOSED"');
+      return result != null && result.contains('OPEN');
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Detect running development server on common ports
+  Future<int?> detectRunningServer() async {
+    if (!isConnected) {
+      debugPrint('Cannot detect server: not connected');
+      return null;
+    }
+
+    // Common development server ports to check (prioritized order)
+    final List<int> commonPorts = [3000, 8080, 5000, 5173, 4200, 8000, 3001, 5174];
+    
+    debugPrint('🔍 Checking for running servers on common ports...');
+    
+    for (final port in commonPorts) {
+      try {
+        // Try multiple detection methods for maximum compatibility
+        // Method 1: lsof (most reliable if available)
+        var result = await runCommandLenient('lsof -i :$port -sTCP:LISTEN 2>/dev/null | grep LISTEN');
+        
+        if (result != null && result.isNotEmpty && result.contains('LISTEN')) {
+          debugPrint('✅ Found server on port $port (via lsof)');
+          return port;
+        }
+        
+        // Method 2: ss command
+        result = await runCommandLenient('ss -tuln 2>/dev/null | grep ":$port "');
+        
+        if (result != null && result.isNotEmpty && result.contains(':$port')) {
+          debugPrint('✅ Found server on port $port (via ss)');
+          return port;
+        }
+        
+        // Method 3: netstat
+        result = await runCommandLenient('netstat -tuln 2>/dev/null | grep ":$port "');
+        
+        if (result != null && result.isNotEmpty && result.contains(':$port')) {
+          debugPrint('✅ Found server on port $port (via netstat)');
+          return port;
+        }
+        
+        // Method 4: Check if we can connect to the port
+        result = await runCommandLenient('timeout 1 bash -c "echo >/dev/tcp/localhost/$port" 2>&1 && echo "OPEN" || echo "CLOSED"');
+        
+        if (result != null && result.contains('OPEN')) {
+          debugPrint('✅ Found server on port $port (via connection test)');
+          return port;
+        }
+        
+      } catch (e) {
+        debugPrint('Error checking port $port: $e');
+      }
+    }
+    
+    debugPrint('❌ No development server detected on common ports');
+    return null;
+  }
+
   // Disconnect from SSH server
   Future<void> disconnect() async {
     debugPrint('Disconnecting SSH session');
@@ -242,19 +507,23 @@ class SshService extends ChangeNotifier {
     }
   }
 
-  Future<dartssh2.SSHSession?> shell() async {
+  Future<dartssh2.SSHSession?> shell({int? terminalWidth, int? terminalHeight}) async {
     if (!isConnected) {
       debugPrint('DEBUG: SshService.shell() - Not connected.');
       return null;
     }
     try {
-      debugPrint('DEBUG: SshService.shell() - Attempting to open shell with PTY and xterm-256color.');
+      // Use provided dimensions or defaults (50% screen height terminal window)
+      final width = terminalWidth ?? 40;  // Conservative 40 chars for iPhone
+      final height = terminalHeight ?? 50; // 50 rows for full screen
+      
+      debugPrint('DEBUG: SshService.shell() - Attempting to open shell with PTY and xterm-256color ($width x $height).');
       // Request a proper PTY with xterm-256color terminal type for full permissions and compatibility
       final session = await _client!.shell(
         pty: dartssh2.SSHPtyConfig(
           type: 'xterm-256color',
-          width: 80,
-          height: 24,
+          width: width,
+          height: height,
         ),
       );
       debugPrint('DEBUG: SshService.shell() - Shell with PTY (xterm-256color) opened successfully.');
@@ -529,6 +798,11 @@ class SshServiceNotifier extends StateNotifier<SshService> {
     await _sshService.disconnect();
   }
   
+  // Detect running development server
+  Future<int?> detectRunningServer() async {
+    return await _sshService.detectRunningServer();
+  }
+  
   // Check connection status and reconnect if needed
   Future<bool> ensureConnected() async {
     debugPrint('Ensuring SSH connection is active');
@@ -651,6 +925,9 @@ final sshPasswordVisibleProvider = StateProvider<bool>((ref) => false);
 final connectedIpProvider = StateProvider<String?>((ref) => null);
 final connectedUsernameProvider = StateProvider<String?>((ref) => null);
 
+// Provider to track detected server port from terminal output
+final detectedServerPortProvider = StateProvider<int?>((ref) => null);
+
 final credentialsProvider = FutureProvider<Map<String, dynamic>?>((ref) async {
   final creds = await ref.read(credentialStorageServiceProvider).loadCredentials();
   if (creds != null) {
@@ -694,6 +971,13 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
     _initLiquidGlassButtons();
   }
   
+  void _registerPowerButtonCallback() {
+    // Always ensure the SSH screen's callback is active
+    LiquidGlassPowerButton.setOnPowerButtonTappedCallback(() {
+      _handlePowerButtonTap();
+    });
+  }
+  
   Future<void> _initLiquidGlassButtons() async {
     final supported = await LiquidGlassPowerButton.isSupported();
     setState(() {
@@ -706,14 +990,15 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
       
       // Initialize info button
       await _initLiquidGlassInfoButton();
+      
+      // Initialize history button
+      await _initLiquidGlassHistoryButton();
     }
   }
   
   Future<void> _initLiquidGlassPowerButton() async {
     // Set up callback for power button taps
-    LiquidGlassPowerButton.setOnPowerButtonTappedCallback(() {
-      _handlePowerButtonTap();
-    });
+    _registerPowerButtonCallback();
     
     // Show the power button with initial connection state
     final currentSshService = ref.read(sshServiceProvider);
@@ -723,43 +1008,94 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
   }
   
   Future<void> _initLiquidGlassInfoButton() async {
-    // Set up callback for info button taps
-    LiquidGlassInfoButton.setOnInfoButtonTappedCallback(() async {
-      // Hide buttons and nav before navigating
-      await LiquidGlassPowerButton.hide();
-      await LiquidGlassInfoButton.hide();
-      await LiquidGlassNav.hide();
-      
-      if (mounted) {
-        await Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (context) => const InfoScreenFullPage(),
-          ),
-        );
-        
-        // Show buttons and nav again when returning
-        if (mounted && _liquidGlassSupported == true) {
-          final currentSshService = ref.read(sshServiceProvider);
-          await LiquidGlassPowerButton.show(isConnected: currentSshService.isConnected);
-          await LiquidGlassInfoButton.show();
-          await LiquidGlassNav.show();
-        }
-      }
-    });
-    
-    // Show the info button
+    // Info button handles sheet natively in Swift - no callback needed
+    // Just show the button
     await LiquidGlassInfoButton.show();
   }
   
-  void _handlePowerButtonTap() {
-    final currentSshService = ref.read(sshServiceProvider);
-    if (currentSshService.isConnected) {
-      // Connected - Navigate to Terminal screen
-      Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (context) => const TerminalScreen(),
+  Future<void> _initLiquidGlassHistoryButton() async {
+    // Set up callback for history button taps
+    LiquidGlassHistoryButton.setOnHistoryTappedCallback(() {
+      _loadRecentCredentials();
+    });
+    
+    // Show the history button
+    await LiquidGlassHistoryButton.show();
+  }
+  
+  Future<void> _loadRecentCredentials() async {
+    debugPrint('🕐 Loading recent credentials');
+    
+    // Load saved credentials
+    final credentials = await ref.read(credentialStorageServiceProvider).loadCredentials();
+    
+    if (credentials != null && mounted) {
+      setState(() {
+        _ipController.text = credentials['ip'] ?? '';
+        _portController.text = credentials['port']?.toString() ?? '22';
+        _usernameController.text = credentials['username'] ?? '';
+        _passwordController.text = credentials['password'] ?? '';
+        _privateKeyController.text = credentials['privateKey'] ?? '';
+        _privateKeyPassphraseController.text = '';
+      });
+      
+      // Show a quick confirmation
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text(
+            'Recent credentials loaded',
+            style: TextStyle(color: Colors.white),
+          ),
+          backgroundColor: Colors.blue,
+          behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.only(
+            bottom: MediaQuery.of(context).size.height - 200,
+            left: 20,
+            right: 20,
+          ),
+          duration: const Duration(seconds: 2),
         ),
       );
+    } else if (mounted) {
+      // No saved credentials
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text(
+            'No recent credentials found',
+            style: TextStyle(color: Colors.white),
+          ),
+          backgroundColor: Colors.orange,
+          behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.only(
+            bottom: MediaQuery.of(context).size.height - 200,
+            left: 20,
+            right: 20,
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+  
+  void _handlePowerButtonTap() async {
+    final currentSshService = ref.read(sshServiceProvider);
+    if (currentSshService.isConnected) {
+      // Connected - Hide history button before navigating to Terminal screen
+      await LiquidGlassHistoryButton.hide();
+      
+      // Navigate to Terminal screen
+      if (mounted) {
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (context) => const TerminalScreen(),
+          ),
+        );
+        
+        // When returning from Terminal, show history button again
+        if (mounted) {
+          await LiquidGlassHistoryButton.show();
+        }
+      }
     } else {
       // Not connected - attempt to connect
       _connect();
@@ -808,31 +1144,29 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
               privateKeyPassphrase: _privateKeyPassphraseController.text.isNotEmpty ? _privateKeyPassphraseController.text : null,
             );
 
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: const Text('Connected!', style: TextStyle(color: Colors.white)),
-            backgroundColor: Colors.black,
-            behavior: SnackBarBehavior.floating,
-            margin: EdgeInsets.only(
-              bottom: MediaQuery.of(context).size.height - 200,
-              left: 20,
-              right: 20,
-            ),
-          ),
-        );
         ref.read(connectedIpProvider.notifier).state = _ipController.text;
         ref.read(connectedUsernameProvider.notifier).state = _usernameController.text;
         
-        // Update liquid glass power button state to connected (blue)
+        // Show checkmark animation then update to connected state
+        await LiquidGlassPowerButton.showSuccessAnimation();
+        await Future.delayed(const Duration(milliseconds: 800));
         await LiquidGlassPowerButton.updateState(isConnected: true);
+        
+        // Hide history button before navigating to Terminal
+        await LiquidGlassHistoryButton.hide();
         
         // Auto-navigate to Terminal screen after successful connection
         if (mounted) {
-          Navigator.of(context).push(
+          await Navigator.of(context).push(
             MaterialPageRoute(
               builder: (context) => const TerminalScreen(),
             ),
           );
+          
+          // When returning from Terminal, show history button again
+          if (mounted) {
+            await LiquidGlassHistoryButton.show();
+          }
         }
       } catch (e) {
         // Provide more specific error messages
@@ -921,6 +1255,14 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
   @override
   Widget build(BuildContext context) {
     final isPasswordVisible = ref.watch(sshPasswordVisibleProvider);
+    
+    // Re-register callback whenever build is called (e.g., when returning from Terminal)
+    // This ensures SSH screen's callback is active
+    if (_liquidGlassSupported == true) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _registerPowerButtonCallback();
+      });
+    }
 
     return Scaffold(
       backgroundColor: const Color(0xFF0a0a0a),
@@ -1077,17 +1419,11 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                               suffixIcon: _liquidGlassSupported == false ? IconButton(
                                 icon: const Icon(CupertinoIcons.info, size: 20, color: Colors.white70),
                                 onPressed: () async {
-                                  // Hide nav before navigating (for non-Liquid Glass case)
-                                  await LiquidGlassNav.hide();
-                                  
                                   await Navigator.of(context).push(
                                     MaterialPageRoute(
                                       builder: (context) => const InfoScreenFullPage(),
                                     ),
                                   );
-                                  
-                                  // Show nav again when returning
-                                  await LiquidGlassNav.show();
                                 },
                               ) : null,
                               border: OutlineInputBorder(
@@ -1258,49 +1594,17 @@ class HomeScreen extends ConsumerStatefulWidget {
   ConsumerState<HomeScreen> createState() => _HomeScreenState();
 }
 
-// Update the _HomeScreenState class
+// Simplified _HomeScreenState - no more bottom navigation
 class _HomeScreenState extends ConsumerState<HomeScreen> {
-  int _selectedIndex = 0;
   bool _checkingConnection = false;
-  bool _useLiquidGlass = false;
-
-  static final List<Widget> _widgetOptions = <Widget>[
-    const SSHSession(),      // Index 0: SSH
-    const PreviewScreen(),   // Index 1: Preview (Terminal removed from nav)
-  ];
 
   @override
   void initState() {
     super.initState();
-    _initLiquidGlass();
     // Schedule connection check after build
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkConnection();
     });
-  }
-  
-  Future<void> _initLiquidGlass() async {
-    final supported = await LiquidGlassNav.isSupported();
-    if (supported) {
-      await LiquidGlassNav.initialize((action) {
-        // Handle navigation from native iOS (Terminal removed from nav)
-        final index = switch (action) {
-          'ssh' => 0,
-          'preview' => 1,
-          _ => 0,
-        };
-        setState(() {
-          _selectedIndex = index;
-        });
-        _checkConnection();
-      });
-      
-      await LiquidGlassNav.show();
-      
-      setState(() {
-        _useLiquidGlass = true;
-      });
-    }
   }
 
   Future<void> _checkConnection() async {
@@ -1317,133 +1621,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
-  void _onItemTapped(int index) {
-    setState(() {
-      _selectedIndex = index;
-    });
-    
-    // Sync with native iOS if using Liquid Glass
-    if (_useLiquidGlass) {
-      LiquidGlassNav.setSelectedTab(index);
-    }
-    
-    // Check connection when switching tabs
-    _checkConnection();
-  }
-
   @override
   Widget build(BuildContext context) {
-    // When returning to SSH tab (index 0), check connection
-    if (_selectedIndex == 0) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _checkConnection();
-      });
-    }
-
-    return Scaffold(
+    return const Scaffold(
       extendBody: true,
       body: Center(
-        child: _widgetOptions.elementAt(_selectedIndex),
-      ),
-      // Only show Flutter bottom nav if Liquid Glass is not available
-      bottomNavigationBar: _useLiquidGlass ? null : LiquidGlassBottomNav(
-        selectedIndex: _selectedIndex,
-        onItemTapped: _onItemTapped,
-      ),
-    );
-  }
-}
-
-// Liquid Glass Bottom Navigation Bar
-class LiquidGlassBottomNav extends StatelessWidget {
-  final int selectedIndex;
-  final Function(int) onItemTapped;
-
-  const LiquidGlassBottomNav({
-    super.key,
-    required this.selectedIndex,
-    required this.onItemTapped,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final items = [
-      (icon: Mdi.chevron_up, label: 'SSH'),
-      (icon: Mdi.chevron_down, label: 'Preview'),
-    ];
-
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(
-          color: Colors.white.withValues(alpha:0.2),
-          width: 1,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.white.withValues(alpha: 0.1),
-            blurRadius: 20,
-            offset: const Offset(0, -5),
-          ),
-        ],
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: List.generate(items.length, (index) {
-          final item = items[index];
-          final isSelected = selectedIndex == index;
-          
-          return Expanded(
-            child: GestureDetector(
-              onTap: () => onItemTapped(index),
-              behavior: HitTestBehavior.opaque,
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 300),
-                curve: Curves.easeInOut,
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: Center(
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 300),
-                    curve: Curves.easeInOut,
-                    padding: const EdgeInsets.all(12),
-                    decoration: isSelected
-                        ? BoxDecoration(
-                            gradient: LinearGradient(
-                              colors: [
-                                Colors.white.withValues(alpha: 0.15),
-                                Colors.white.withValues(alpha: 0.05),
-                              ],
-                              begin: Alignment.topLeft,
-                              end: Alignment.bottomRight,
-                            ),
-                            borderRadius: BorderRadius.circular(16),
-                            border: Border.all(
-                              color: Colors.white.withValues(alpha: 0.3),
-                              width: 1,
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.white.withValues(alpha:0.2),
-                                blurRadius: 10,
-                                offset: const Offset(0, 2),
-                              ),
-                            ],
-                          )
-                        : null,
-                    child: Iconify(
-                      item.icon,
-                      color: isSelected ? Colors.white : Colors.white.withValues(alpha: 0.5),
-                      size: 24,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          );
-        }),
+        child: SSHSession(),
       ),
     );
   }

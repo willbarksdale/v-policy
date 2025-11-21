@@ -67,17 +67,21 @@ No desktop IDE needed. Just SSH, terminal, AI CLI tools, and preview.
 - **iOS 26.0 or later**
 - iPhone (portrait mode only)
 - SSH server with your AI CLI tools installed
+- **tmux** installed on your server (for persistent terminal sessions)
 
 ---
 
 ## Getting Started
 
 1. **Set up your server** with SSH access (any Linux VPS)
-2. **Install your AI CLI tools** (Gemini CLI, Qwen, Claude Code, etc.)
-3. **Download v** and connect with your SSH credentials
-4. **Open terminal** and start vibing with AI
-5. **Generate projects** using your CLI AI assistant
-6. **Preview live** with the built-in WebView
+2. **Install tmux** on your server:
+   - macOS: `brew install tmux`
+   - Linux: `sudo apt install tmux` (or yum, dnf, pacman)
+3. **Install your AI CLI tools** (Gemini CLI, Qwen, Claude Code, etc.)
+4. **Download v** and connect with your SSH credentials
+5. **Open terminal** and start vibing with AI
+6. **Generate projects** using your CLI AI assistant
+7. **Preview live** with the built-in WebView
 
 ---
 

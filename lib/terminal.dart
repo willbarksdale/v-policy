@@ -2,37 +2,581 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:xterm/xterm.dart';
 import 'package:dartssh2/dartssh2.dart' as dartssh2;
 import 'ssh.dart';
-import 'tmux.dart';
+import 'preview.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'liquid_glass.dart';
 
-// Terminal Tab Model (backed by tmux windows or fallback shell session)
+// ============================================================================
+// LIQUID GLASS - Terminal Tabs (Native iOS Component)
+// ============================================================================
+/// Native terminal tab buttons at the top of the terminal screen
+class LiquidGlassTerminalTabs {
+  static const MethodChannel _channel = MethodChannel('liquid_glass_terminal_tabs');
+  
+  static Future<bool> isSupported() async {
+    try {
+      final bool? result = await _channel.invokeMethod('isLiquidGlassSupported');
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error checking liquid glass tabs support: $e');
+      return false;
+    }
+  }
+  
+  static Future<bool> show({
+    required int activeTab,
+    required int tabCount,
+  }) async {
+    try {
+      final bool? result = await _channel.invokeMethod('show', {
+        'activeTab': activeTab,
+        'tabCount': tabCount,
+      });
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error showing liquid glass tabs: $e');
+      return false;
+    }
+  }
+  
+  static Future<bool> hide() async {
+    try {
+      final bool? result = await _channel.invokeMethod('hide');
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error hiding liquid glass tabs: $e');
+      return false;
+    }
+  }
+  
+  static Future<bool> updateTabs({
+    required int activeTab,
+    required int tabCount,
+  }) async {
+    try {
+      final bool? result = await _channel.invokeMethod('updateTabs', {
+        'activeTab': activeTab,
+        'tabCount': tabCount,
+      });
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error updating liquid glass tabs: $e');
+      return false;
+    }
+  }
+  
+  static Future<void> initialize({
+    required Function(int index) onTabTapped,
+    required Function(int index) onTabLongPressed,
+  }) async {
+    _channel.setMethodCallHandler((call) async {
+      switch (call.method) {
+        case 'onTabTapped':
+          final int index = call.arguments['index'] as int;
+          onTabTapped(index);
+          break;
+        case 'onTabLongPressed':
+          final int index = call.arguments['index'] as int;
+          onTabLongPressed(index);
+          break;
+      }
+    });
+  }
+}
+
+// ============================================================================
+// LIQUID GLASS - Terminal Input (Native iOS Component)
+// ============================================================================
+/// Native terminal input bar with keyboard handling
+class LiquidGlassTerminalInput {
+  static const MethodChannel _channel = MethodChannel('liquid_glass_terminal_input');
+  
+  static Function(String)? _onCommandSent;
+  static Function(String)? _onInputChanged;
+  static Function()? _onDismissKeyboard;
+  static Function()? _onKeyboardShow;
+  static Function()? _onKeyboardHide;
+
+  static Future<bool> isSupported() async {
+    try {
+      final bool result = await _channel.invokeMethod('isLiquidGlassSupported');
+      return result;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  static Future<void> initialize({
+    required Function(String) onCommandSent,
+    Function(String)? onInputChanged,
+    Function()? onDismissKeyboard,
+    Function()? onKeyboardShow,
+    Function()? onKeyboardHide,
+  }) async {
+    _onCommandSent = onCommandSent;
+    _onInputChanged = onInputChanged;
+    _onDismissKeyboard = onDismissKeyboard;
+    _onKeyboardShow = onKeyboardShow;
+    _onKeyboardHide = onKeyboardHide;
+
+    _channel.setMethodCallHandler((call) async {
+      switch (call.method) {
+        case 'onCommandSent':
+          final text = call.arguments['text'] as String?;
+          if (text != null) _onCommandSent?.call(text);
+          break;
+        case 'onInputChanged':
+          final text = call.arguments['text'] as String?;
+          if (text != null) _onInputChanged?.call(text);
+          break;
+        case 'onDismissKeyboard':
+          _onDismissKeyboard?.call();
+          break;
+        case 'onKeyboardShow':
+          _onKeyboardShow?.call();
+          break;
+        case 'onKeyboardHide':
+          _onKeyboardHide?.call();
+          break;
+      }
+    });
+  }
+
+  static Future<bool> show({String placeholder = 'Type commands here...'}) async {
+    try {
+      final bool result = await _channel.invokeMethod('showTerminalInput', {'placeholder': placeholder});
+      return result;
+    } catch (e) {
+      debugPrint('Error showing terminal input: $e');
+      return false;
+    }
+  }
+
+  static Future<bool> hide() async {
+    try {
+      final bool result = await _channel.invokeMethod('hideTerminalInput');
+      return result;
+    } catch (e) {
+      debugPrint('Error hiding terminal input: $e');
+      return false;
+    }
+  }
+
+  static Future<bool> clear() async {
+    try {
+      final bool result = await _channel.invokeMethod('clearTerminalInput');
+      return result;
+    } catch (e) {
+      debugPrint('Error clearing terminal input: $e');
+      return false;
+    }
+  }
+
+  static Future<bool> setText(String text) async {
+    try {
+      final bool result = await _channel.invokeMethod('setTerminalInputText', {'text': text});
+      return result;
+    } catch (e) {
+      debugPrint('Error setting terminal input text: $e');
+      return false;
+    }
+  }
+
+  static Future<bool> dismissKeyboard() async {
+    try {
+      final bool result = await _channel.invokeMethod('dismissKeyboard');
+      return result;
+    } catch (e) {
+      debugPrint('Error dismissing keyboard: $e');
+      return false;
+    }
+  }
+}
+
+// ============================================================================
+// TMUX SERVICE - Persistent Terminal Sessions
+// ============================================================================
+
+/// TmuxService manages 3 persistent terminal sessions via tmux
+/// Sessions are named v_session_0, v_session_1, v_session_2
+/// They persist across app restarts and reconnections
+class TmuxService {
+  final SshService _sshService;
+  final Ref? _ref; // Optional ref for updating providers
+  
+  // Fixed session names for persistence
+  static const List<String> sessionNames = ['v_session_1', 'v_session_2', 'v_session_3'];
+  
+  // One SSH session per terminal tab
+  final List<dartssh2.SSHSession?> _sessions = [null, null, null];
+  final List<StreamSubscription?> _subscriptions = [null, null, null];
+  
+  bool _isInitialized = false;
+  int _activeSessionIndex = 0;
+  
+  final StreamController<TmuxEvent> _eventController = StreamController.broadcast();
+  Stream<TmuxEvent> get events => _eventController.stream;
+  
+  // Output buffering for each session to prevent UI flooding during rapid updates
+  final List<StringBuffer> _outputBuffers = [StringBuffer(), StringBuffer(), StringBuffer()];
+  final List<Timer?> _flushTimers = [null, null, null];
+  final List<DateTime> _lastFlushTimes = [DateTime.now(), DateTime.now(), DateTime.now()];
+  
+  // Adaptive buffer delay: shorter for initial bursts, longer for sustained streams
+  static const Duration _shortFlushDelay = Duration(milliseconds: 8);  // Initial burst
+  static const Duration _longFlushDelay = Duration(milliseconds: 16);  // Sustained stream
+  static const Duration _burstThreshold = Duration(milliseconds: 100); // Time to consider it a "burst"
+  
+  TmuxService(this._sshService, [this._ref]);
+  
+  bool get isInitialized => _isInitialized;
+  int get activeSessionIndex => _activeSessionIndex;
+  
+  /// Check if tmux is available on the server
+  /// Returns true if tmux is found, false otherwise
+  /// Uses a single optimized command to reduce SSH channel usage
+  Future<bool> checkTmuxInstalled() async {
+    if (!_sshService.isConnected) {
+      debugPrint('❌ Cannot check tmux: SSH not connected');
+      return false;
+    }
+    
+    try {
+      debugPrint('🔍 Checking for tmux...');
+      
+      // Optimized: Use a single command that tries all methods in sequence
+      // This uses only ONE SSH channel instead of three
+      // The command will exit on first success
+      final result = await _sshService.runCommandLenient(
+        'command -v tmux >/dev/null 2>&1 && echo "FOUND" || '
+        'which tmux >/dev/null 2>&1 && echo "FOUND" || '
+        'tmux -V >/dev/null 2>&1 && echo "FOUND" || '
+        'echo "NOT_FOUND"',
+        maxRetries: 5, // Increase retries for better reliability
+      );
+      
+      if (result == null) {
+        debugPrint('⚠️ tmux detection returned null');
+        return false;
+      }
+      
+      final output = result.trim().toUpperCase();
+      debugPrint('📋 tmux detection output: "$output"');
+      
+      if (output.contains('FOUND')) {
+        debugPrint('✅ tmux found on system');
+        return true;
+      }
+      
+      if (output.contains('NOT_FOUND') || output.isEmpty) {
+        debugPrint('❌ tmux not found in PATH');
+        return false;
+      }
+      
+      // Unexpected output - log it and assume not found
+      debugPrint('⚠️ Unexpected tmux detection output: "$output"');
+      return false;
+      
+    } catch (e) {
+      debugPrint('❌ Error checking tmux: $e');
+      return false;
+    }
+  }
+  
+  /// Initialize all 3 persistent tmux sessions
+  /// Attempts to attach to existing sessions, creates new ones if needed
+  Future<bool> initialize({int terminalWidth = 40, int terminalHeight = 50}) async {
+    // Prevent re-initialization without cleanup
+    if (_isInitialized) {
+      debugPrint('⚠️ Tmux already initialized, cleaning up before re-init');
+      _cleanup();
+    }
+    
+    if (!_sshService.isConnected) {
+      debugPrint('❌ Cannot initialize tmux: SSH not connected');
+      return false;
+    }
+    
+    try {
+      debugPrint('🚀 Initializing 3 persistent tmux sessions (${terminalWidth}x$terminalHeight)...');
+      
+      // Create/attach to each session
+      for (int i = 0; i < 3; i++) {
+        final sessionName = sessionNames[i];
+        debugPrint('📝 Setting up session $i: $sessionName');
+        
+        // Check if session already exists
+        final checkResult = await _sshService.runCommandLenient(
+          'tmux has-session -t $sessionName 2>/dev/null && echo "exists" || echo "new"'
+        );
+        
+        final sessionExists = checkResult?.trim() == 'exists';
+        debugPrint(sessionExists 
+          ? '   ✅ Session $sessionName exists, attaching...' 
+          : '   🆕 Creating new session $sessionName...'
+        );
+        
+        // Open SSH shell session with specified terminal size
+        final session = await _sshService.shell(
+          terminalWidth: terminalWidth,
+          terminalHeight: terminalHeight,
+        );
+        if (session == null) {
+          debugPrint('   ❌ Failed to open shell for session $i');
+          return false;
+        }
+        
+        // Attach to tmux session (or create if new)
+        if (sessionExists) {
+          session.write(utf8.encode('tmux attach-session -t $sessionName\n'));
+        } else {
+          session.write(utf8.encode('tmux new-session -s $sessionName\n'));
+        }
+        
+        // Store session
+        _sessions[i] = session;
+        
+        // Listen to output (stdout only - stderr is for errors, not terminal output)
+        _subscriptions[i] = session.stdout.listen(
+          (data) => _handleSessionOutput(i, data),
+          onError: (error) {
+            debugPrint('   ❌ Session $i error: $error');
+            _eventController.add(TmuxError('Session $i error: $error'));
+          },
+          onDone: () {
+            debugPrint('   ⚠️ Session $i closed');
+            _sessions[i] = null;
+          },
+        );
+        
+        // Listen to stderr only for logging errors (don't send to terminal display)
+        session.stderr.listen(
+          (data) {
+            final output = utf8.decode(data);
+            debugPrint('   ⚠️ Session $i stderr: ${output.trim()}');
+          },
+          onError: (error) {
+            debugPrint('   ❌ Session $i stderr error: $error');
+          },
+        );
+        
+        debugPrint('   ✅ Session $i ready');
+        
+        // Emit event for UI
+        _eventController.add(TmuxSessionReady(i, sessionName));
+        
+        // Small delay between sessions
+        await Future.delayed(const Duration(milliseconds: 200));
+      }
+      
+      _isInitialized = true;
+      _activeSessionIndex = 0;
+      debugPrint('✅ All 3 tmux sessions initialized successfully');
+      
+      return true;
+      
+    } catch (e, stackTrace) {
+      debugPrint('❌ Error initializing tmux: $e');
+      debugPrint('Stack trace: $stackTrace');
+      _cleanup();
+      return false;
+    }
+  }
+  
+  /// Switch to a specific session (0, 1, or 2)
+  Future<bool> switchToSession(int sessionIndex) async {
+    debugPrint('🔄 Switching to session $sessionIndex');
+    
+    if (!_isInitialized) {
+      debugPrint('❌ Tmux not initialized');
+      return false;
+    }
+    
+    if (sessionIndex < 0 || sessionIndex >= 3) {
+      debugPrint('❌ Invalid session index: $sessionIndex');
+      return false;
+    }
+    
+    if (_sessions[sessionIndex] == null) {
+      debugPrint('❌ Session $sessionIndex not available');
+      return false;
+    }
+    
+    _activeSessionIndex = sessionIndex;
+    _eventController.add(TmuxSessionSwitched(sessionIndex));
+    debugPrint('✅ Switched to session $sessionIndex');
+    
+    return true;
+  }
+  
+  /// Send input to the currently active session
+  Future<void> sendInput(String text) async {
+    if (!_isInitialized) {
+      debugPrint('❌ Cannot send input: tmux not initialized');
+      return;
+    }
+    
+    final activeSession = _sessions[_activeSessionIndex];
+    if (activeSession == null) {
+      debugPrint('❌ Cannot send input: active session not available');
+      return;
+    }
+    
+    try {
+      activeSession.write(utf8.encode(text));
+    } catch (e) {
+      debugPrint('❌ Error sending input to session $_activeSessionIndex: $e');
+    }
+  }
+  
+  /// Handle output from a specific session with adaptive buffering
+  void _handleSessionOutput(int sessionIndex, List<int> data) {
+    try {
+      final output = utf8.decode(data);
+      
+      // Debug: Log ALL output to diagnose blank screen issue
+      debugPrint('📊 Session $sessionIndex output (${output.length} chars): ${output.substring(0, output.length > 50 ? 50 : output.length)}...');
+      
+      // Parse terminal output for server startup messages
+      if (output.contains('localhost') || output.contains('http://') || 
+          output.contains('Ready') || output.contains('started')) {
+        final detectedPort = SshService.parseServerPortFromOutput(output);
+        if (detectedPort != null && _ref != null) {
+          _ref.read(detectedServerPortProvider.notifier).state = detectedPort;
+          debugPrint('🎯 Auto-detected server port from session $sessionIndex: $detectedPort');
+        }
+      }
+      
+      // Buffer the output instead of sending immediately
+      _outputBuffers[sessionIndex].write(output);
+      
+      // Adaptive buffering: use shorter delay for initial bursts (first message),
+      // longer delay for sustained streams (thinking animations)
+      final now = DateTime.now();
+      final timeSinceLastFlush = now.difference(_lastFlushTimes[sessionIndex]);
+      final isInitialBurst = timeSinceLastFlush > _burstThreshold;
+      final flushDelay = isInitialBurst ? _shortFlushDelay : _longFlushDelay;
+      
+      // Cancel existing flush timer and start a new one
+      _flushTimers[sessionIndex]?.cancel();
+      _flushTimers[sessionIndex] = Timer(flushDelay, () {
+        _flushOutputBuffer(sessionIndex);
+      });
+      
+    } catch (e) {
+      debugPrint('❌ Error handling session $sessionIndex output: $e');
+    }
+  }
+  
+  /// Flush buffered output to the UI
+  void _flushOutputBuffer(int sessionIndex) {
+    try {
+      final buffer = _outputBuffers[sessionIndex];
+      if (buffer.isNotEmpty) {
+        final output = buffer.toString();
+        
+        // Debug: Log what we're about to send to terminal display
+        debugPrint('🖥️ Flushing ${output.length} chars to terminal display for session $sessionIndex');
+        final preview = output.length > 80 ? output.substring(0, 80) : output;
+        debugPrint('   Content: "${preview.replaceAll('\n', '\\n').replaceAll('\r', '\\r')}${output.length > 80 ? '...' : ''}"');
+        
+        buffer.clear();
+        
+        // Update last flush time for adaptive buffering
+        _lastFlushTimes[sessionIndex] = DateTime.now();
+        
+        // Forward batched output to UI
+        _eventController.add(TmuxOutput(sessionIndex, output));
+      }
+    } catch (e) {
+      debugPrint('❌ Error flushing output buffer for session $sessionIndex: $e');
+    }
+  }
+  
+  /// Cleanup helper
+  void _cleanup() {
+    for (int i = 0; i < 3; i++) {
+      _subscriptions[i]?.cancel();
+      _subscriptions[i] = null;
+      _sessions[i]?.close();
+      _sessions[i] = null;
+      _flushTimers[i]?.cancel();
+      _flushTimers[i] = null;
+      _outputBuffers[i].clear();
+    }
+    _isInitialized = false;
+  }
+  
+  void dispose() {
+    debugPrint('🧹 Disposing TmuxService');
+    _cleanup();
+    _eventController.close();
+  }
+}
+
+/// Base class for tmux events
+abstract class TmuxEvent {}
+
+/// Emitted when a session is ready
+class TmuxSessionReady extends TmuxEvent {
+  final int sessionIndex;
+  final String sessionName;
+  TmuxSessionReady(this.sessionIndex, this.sessionName);
+}
+
+/// Emitted when switching between sessions
+class TmuxSessionSwitched extends TmuxEvent {
+  final int sessionIndex;
+  TmuxSessionSwitched(this.sessionIndex);
+}
+
+/// Emitted when output is received from a session
+class TmuxOutput extends TmuxEvent {
+  final int sessionIndex;
+  final String output;
+  TmuxOutput(this.sessionIndex, this.output);
+}
+
+/// Emitted when an error occurs
+class TmuxError extends TmuxEvent {
+  final String message;
+  TmuxError(this.message);
+}
+
+// ============================================================================
+// TERMINAL DATA MODELS
+// ============================================================================
+
+// Terminal Tab Model (backed by tmux session)
 class TerminalTab {
   final String id;
   final String name;
   final Terminal terminal;
-  final int tmuxWindowId; // -1 for non-tmux tabs
-  final dartssh2.SSHSession? shellSession; // For fallback mode
+  final int sessionIndex; // 0, 1, or 2 (maps to v_session_0, v_session_1, v_session_2)
+  final int terminalWidth;
+  final int terminalHeight;
 
   TerminalTab({
     required this.id,
     required this.name,
     required this.terminal,
-    required this.tmuxWindowId,
-    this.shellSession,
+    required this.sessionIndex,
+    this.terminalWidth = 40,
+    this.terminalHeight = 50,
   });
 
-  TerminalTab copyWith({String? name}) {
+  TerminalTab copyWith({String? name, int? terminalWidth, int? terminalHeight}) {
     return TerminalTab(
       id: id,
       name: name ?? this.name,
       terminal: terminal,
-      tmuxWindowId: tmuxWindowId,
-      shellSession: shellSession,
+      sessionIndex: sessionIndex,
+      terminalWidth: terminalWidth ?? this.terminalWidth,
+      terminalHeight: terminalHeight ?? this.terminalHeight,
     );
   }
 }
@@ -42,14 +586,12 @@ class TerminalTabsState {
   final List<TerminalTab> tabs;
   final int activeTabIndex;
   final bool tmuxReady;
-  final bool fallbackMode; // Using basic terminal without tmux
   final String? statusMessage;
 
   TerminalTabsState({
     required this.tabs,
     required this.activeTabIndex,
     this.tmuxReady = false,
-    this.fallbackMode = false,
     this.statusMessage,
   });
 
@@ -57,7 +599,6 @@ class TerminalTabsState {
     List<TerminalTab>? tabs,
     int? activeTabIndex,
     bool? tmuxReady,
-    bool? fallbackMode,
     String? statusMessage,
     bool clearStatusMessage = false,
   }) {
@@ -65,7 +606,6 @@ class TerminalTabsState {
       tabs: tabs ?? this.tabs,
       activeTabIndex: activeTabIndex ?? this.activeTabIndex,
       tmuxReady: tmuxReady ?? this.tmuxReady,
-      fallbackMode: fallbackMode ?? this.fallbackMode,
       statusMessage: clearStatusMessage ? null : (statusMessage ?? this.statusMessage),
     );
   }
@@ -79,7 +619,7 @@ class TerminalTabsState {
 // Tmux Service Provider
 final tmuxServiceProvider = Provider<TmuxService>((ref) {
   final sshService = ref.watch(sshServiceProvider);
-  final tmuxService = TmuxService(sshService);
+  final tmuxService = TmuxService(sshService, ref);
   
   ref.onDispose(() {
     debugPrint('Disposing TmuxService');
@@ -109,35 +649,45 @@ final terminalTabsProvider =
 
 // Terminal Tabs Notifier (tmux-based)
 class TerminalTabsNotifier extends StateNotifier<TerminalTabsState> {
-  final SshService _sshService;
   final TmuxService _tmuxService;
   static const int maxTabs = 3;
   
   StreamSubscription? _tmuxEventsSubscription;
   bool _isInitializing = false;
 
-  TerminalTabsNotifier(this._sshService, this._tmuxService)
+  TerminalTabsNotifier(SshService sshService, this._tmuxService)
       : super(TerminalTabsState(tabs: [], activeTabIndex: -1)) {
-    // Listen to tmux events
+    // Listen to tmux events with reduced debug logging
     _tmuxEventsSubscription = _tmuxService.events.listen(_handleTmuxEvent);
   }
   
   void _handleTmuxEvent(TmuxEvent event) {
-    debugPrint('📨 Handling tmux event: ${event.runtimeType}');
+    // Reduce debug spam - only log non-output events
+    if (event is! TmuxOutput) {
+      debugPrint('📨 Handling tmux event: ${event.runtimeType}');
+    }
     
-    if (event is TmuxWindowCreated) {
-      // Create a tab for the new window
-      debugPrint('🪟 Window created event: ${event.window.id}');
-      _createTabForWindow(event.window.id);
+    if (event is TmuxSessionReady) {
+      // Create a tab for the new session
+      debugPrint('✅ Session ready: ${event.sessionName} (index: ${event.sessionIndex})');
+      _createTabForSession(event.sessionIndex, event.sessionName);
     } else if (event is TmuxOutput) {
-      // Find the tab for this window and update its terminal
+      // Find the tab for this session and update its terminal
+      // Terminal writes are efficient and don't trigger rebuilds
       try {
         final tab = state.tabs.firstWhere(
-          (t) => t.tmuxWindowId == event.windowId,
+          (t) => t.sessionIndex == event.sessionIndex,
         );
+        
+        // Debug: Log what we're writing to xterm
+        debugPrint('✍️ Writing ${event.output.length} chars to xterm for session ${event.sessionIndex}');
+        if (event.output.length < 100) {
+          debugPrint('   Content: "${event.output.replaceAll('\n', '\\n').replaceAll('\r', '\\r')}"');
+        }
+        
         tab.terminal.write(event.output);
       } catch (e) {
-        debugPrint('No tab found for window ${event.windowId}');
+        // Silently ignore - tab might not be created yet
       }
     } else if (event is TmuxError) {
       debugPrint('❌ tmux error event: ${event.message}');
@@ -145,307 +695,253 @@ class TerminalTabsNotifier extends StateNotifier<TerminalTabsState> {
     }
   }
 
-  Future<void> initializeTmux() async {
-    if (_isInitializing || _tmuxService.isInitialized) {
-      debugPrint('tmux already initializing or initialized');
+  Future<void> initializeTmux({bool forceRetry = false}) async {
+    // Prevent concurrent initialization attempts
+    if (_isInitializing) {
+      debugPrint('⚠️ Tmux initialization already in progress, skipping duplicate request');
       return;
     }
     
-    _isInitializing = true;
-    state = state.copyWith(statusMessage: 'Checking tmux...');
-    debugPrint('🔍 Checking tmux installation...');
+    if (!forceRetry && _tmuxService.isInitialized) {
+      debugPrint('✅ Tmux already initialized');
+      return;
+    }
     
-    // Load cached tmux info first
-    await _tmuxService.loadCachedTmuxInfo();
+    // Reset state for retry
+    if (forceRetry) {
+      debugPrint('🔄 Force retrying tmux initialization...');
+      _isInitializing = false;
+    }
+    
+    _isInitializing = true;
+    state = state.copyWith(statusMessage: 'Checking for tmux...');
+    debugPrint('🔍 Checking for tmux...');
     
     try {
-      // Add timeout to prevent infinite loading
-      final checkResult = await _tmuxService.checkTmuxInstalled()
-          .timeout(const Duration(seconds: 10), onTimeout: () {
-        debugPrint('⏱️ tmux check timed out, assuming not installed');
-        return TmuxCheckResult.notInstalledUnknown;
-      });
+      // Keep checking until tmux is found (with overall timeout to prevent infinite loop)
+      bool tmuxInstalled = false;
+      int attempt = 0;
+      final startTime = DateTime.now();
+      const maxDuration = Duration(minutes: 2); // Give up after 2 minutes
       
-      debugPrint('📋 tmux check result: $checkResult');
-      
-      if (checkResult == TmuxCheckResult.installed) {
-        // tmux is ready, initialize it
-        debugPrint('✅ tmux found, initializing...');
-        state = state.copyWith(statusMessage: 'Initializing persistent terminal...');
+      while (!tmuxInstalled) {
+        attempt++;
         
-        final success = await _tmuxService.initialize()
-            .timeout(const Duration(seconds: 10), onTimeout: () {
-          debugPrint('⏱️ tmux initialization timed out');
-          return false;
-        });
-        
-        debugPrint('🎯 tmux initialize result: $success');
-        
-        if (success) {
-          debugPrint('✅ tmux initialized successfully');
-          // The first tab will be created automatically by the TmuxWindowCreated event
-          state = state.copyWith(
-            tmuxReady: true,
-            statusMessage: 'tmux_success', // Special flag for success state
-          );
-          
-          // Clear success message after 3 seconds
-          Future.delayed(const Duration(seconds: 3), () {
-            debugPrint('⏰ Auto-dismissing tmux success banner');
-            if (state.statusMessage == 'tmux_success') {
-              state = state.copyWith(statusMessage: null);
-            }
-          });
-        } else {
-          debugPrint('❌ Failed to start tmux session, falling back to basic terminal');
-          // Fall back to basic terminal if tmux fails
-          state = state.copyWith(
-            fallbackMode: true,
-            statusMessage: 'tmux_not_installed:notInstalledUnknown',
-          );
-          await createFallbackTerminal();
+        // Check if we've exceeded the overall timeout
+        if (DateTime.now().difference(startTime) > maxDuration) {
+          debugPrint('⏰ Tmux detection timed out after ${maxDuration.inSeconds} seconds');
+          break; // Exit loop and show requirement screen
         }
-      } else {
-        // tmux not installed - enable fallback mode with basic terminal
-        debugPrint('⚠️ tmux not installed, enabling fallback mode');
+        
+        if (attempt > 1) {
+          debugPrint('🔄 Retry attempt $attempt for tmux detection...');
+          // Wait 2 seconds between retries to avoid hammering the server
+          await Future.delayed(const Duration(seconds: 2));
+        }
+        
+        try {
+          tmuxInstalled = await _tmuxService.checkTmuxInstalled()
+              .timeout(const Duration(seconds: 10));
+          
+          if (tmuxInstalled) {
+            debugPrint('✅ tmux detected after $attempt attempt(s)');
+            break; // Success! Exit loop
+          } else {
+            // Not found, but no error - continue retrying
+            debugPrint('⚠️ tmux not found, retrying...');
+          }
+        } catch (e) {
+          debugPrint('⚠️ Tmux check attempt $attempt failed: $e');
+          // Don't give up - keep trying (unless timeout reached)
+        }
+      }
+      
+      if (!tmuxInstalled) {
+        // tmux not found after continuous checking - show requirement screen
+        debugPrint('❌ tmux not installed (checked for ${DateTime.now().difference(startTime).inSeconds}s)');
         state = state.copyWith(
-          fallbackMode: true,
-          statusMessage: 'tmux_not_installed:${checkResult.name}',
+          statusMessage: 'tmux_required',
+          clearStatusMessage: false,
         );
-        // Create a basic fallback terminal
-        debugPrint('📝 Creating fallback terminal...');
-        await createFallbackTerminal();
-        debugPrint('✅ Fallback terminal creation completed');
+        _isInitializing = false;
+        return;
       }
+      
+      debugPrint('✅ tmux found, initializing 3 persistent sessions...');
+      state = state.copyWith(statusMessage: 'Setting up persistent terminal...');
+      
+      // Conservative sizing for mobile phones
+      // iPhone displays roughly 40-45 characters comfortably in portrait
+      // Using 40 to ensure nothing wraps or gets cut off
+      const terminalWidth = 40;   // Conservative for iPhone portrait
+      const terminalHeight = 50;  // Plenty of vertical space
+      
+      // Initialize tmux (creates/attaches to 3 sessions)
+      final success = await _tmuxService.initialize(
+        terminalWidth: terminalWidth,
+        terminalHeight: terminalHeight,
+      ).timeout(const Duration(seconds: 15));
+      
+      if (success) {
+        debugPrint('✅ All tmux sessions initialized');
+        // Tabs will be created automatically via TmuxSessionReady events
+        state = state.copyWith(
+          tmuxReady: true,
+          statusMessage: null,
+        );
+      } else {
+        debugPrint('❌ Failed to initialize tmux sessions');
+        state = state.copyWith(
+          statusMessage: 'Failed to initialize tmux. Please check your connection.',
+        );
+      }
+      
     } catch (e, stackTrace) {
-      debugPrint('❌ Error checking/initializing tmux: $e');
+      debugPrint('❌ Error initializing tmux: $e');
       debugPrint('Stack trace: $stackTrace');
-      
-      // On any error, fall back to basic terminal
-      debugPrint('🔄 Falling back to basic terminal due to error');
       state = state.copyWith(
-        fallbackMode: true,
-        statusMessage: 'tmux_not_installed:notInstalledUnknown',
+        statusMessage: 'Error: $e',
       );
-      
-      try {
-        await createFallbackTerminal();
-      } catch (fallbackError) {
-        debugPrint('❌ Fallback terminal creation also failed: $fallbackError');
-        state = state.copyWith(statusMessage: 'Error: Failed to create terminal');
-      }
     } finally {
       _isInitializing = false;
-      debugPrint('🏁 initializeTmux finished, isInitializing: false');
+      debugPrint('🏁 initializeTmux finished');
     }
   }
   
-  Future<void> installAndInitializeTmux(TmuxCheckResult osType) async {
-    state = state.copyWith(statusMessage: 'Installing tmux...');
-    
-    try {
-      final installed = await _tmuxService.installTmux(osType);
-      
-      if (installed) {
-        // Now initialize
-        state = state.copyWith(statusMessage: 'Initializing persistent terminal...');
-        final success = await _tmuxService.initialize();
-        
-        if (success) {
-          await _createTabForWindow(0);
-          state = state.copyWith(
-            tmuxReady: true,
-            statusMessage: null,
-          );
-        } else {
-          state = state.copyWith(
-            statusMessage: 'Failed to start tmux session',
-          );
-        }
-      } else {
-        state = state.copyWith(
-          statusMessage: 'Failed to install tmux. Please install manually.',
-        );
-      }
-    } catch (e) {
-      debugPrint('Error installing tmux: $e');
-      state = state.copyWith(statusMessage: 'Installation error: $e');
-    }
-  }
-
-  Future<void> _createTabForWindow(int windowId) async {
+  Future<void> _createTabForSession(int sessionIndex, String sessionName) async {
     final tabId = DateTime.now().millisecondsSinceEpoch.toString();
-    final tabName = '${state.tabs.length + 1}';
+    final tabName = '${sessionIndex + 1}';
     final terminal = Terminal(maxLines: 10000);
+
+    // Use the same terminal dimensions that were used during initialization
+    // Optimized for 50% screen height terminal window
+    const terminalWidth = 40;
+    const terminalHeight = 50;
 
     final newTab = TerminalTab(
       id: tabId,
       name: tabName,
       terminal: terminal,
-      tmuxWindowId: windowId,
+      sessionIndex: sessionIndex,
+      terminalWidth: terminalWidth,
+      terminalHeight: terminalHeight,
     );
 
+    // Only set active tab index for the first session (session 0 = tab 1)
+    // Subsequent sessions are created but not automatically selected
+    final shouldSetActive = state.tabs.isEmpty;
+    
     state = state.copyWith(
       tabs: [...state.tabs, newTab],
-      activeTabIndex: state.tabs.length,
+      activeTabIndex: shouldSetActive ? 0 : null, // Stay on first tab
     );
     
-    debugPrint('Created tab for tmux window $windowId');
-  }
-
-  // Create a basic fallback terminal (no tmux)
-  Future<void> createFallbackTerminal() async {
-    debugPrint('📝 Creating fallback terminal (no tmux)...');
-    
-    try {
-      final tabId = DateTime.now().millisecondsSinceEpoch.toString();
-      debugPrint('  ↳ Tab ID: $tabId');
-      
-      final terminal = Terminal(maxLines: 10000);
-      debugPrint('  ↳ Terminal object created');
-
-      // Open a basic shell session
-      debugPrint('  ↳ Opening SSH shell session...');
-      final session = await _sshService.shell()
-          .timeout(const Duration(seconds: 5), onTimeout: () {
-        debugPrint('  ⏱️ Shell session creation timed out');
-        return null;
-      });
-      
-      if (session == null) {
-        debugPrint('  ❌ Failed to open shell for fallback terminal');
-        state = state.copyWith(statusMessage: 'Failed to open shell');
-        return;
-      }
-      
-      debugPrint('  ✅ Shell session created');
-
-      final newTab = TerminalTab(
-        id: tabId,
-        name: 'Terminal',
-        terminal: terminal,
-        tmuxWindowId: -1, // -1 indicates non-tmux tab
-        shellSession: session,
-      );
-      
-      debugPrint('  ↳ Tab object created');
-
-      // Listen to session output
-      session.stdout.listen(
-        (data) {
-          final output = utf8.decode(data);
-          terminal.write(output);
-        },
-        onError: (error) {
-          debugPrint('  ❌ Stdout error: $error');
-        },
-      );
-
-      session.stderr.listen(
-        (data) {
-          final output = utf8.decode(data);
-          terminal.write(output);
-        },
-        onError: (error) {
-          debugPrint('  ❌ Stderr error: $error');
-        },
-      );
-      
-      debugPrint('  ↳ Output listeners attached');
-
-      state = state.copyWith(
-        tabs: [newTab],
-        activeTabIndex: 0,
-        statusMessage: null,
-      );
-      
-      debugPrint('✅ Fallback terminal created successfully! Tab count: ${state.tabs.length}');
-    } catch (e, stackTrace) {
-      debugPrint('❌ Exception in createFallbackTerminal: $e');
-      debugPrint('Stack trace: $stackTrace');
-      state = state.copyWith(statusMessage: 'Error creating terminal: $e');
-      rethrow;
-    }
-  }
-
-  Future<void> createNewTab() async {
-    debugPrint('🆕 createNewTab() called - Current tabs: ${state.tabs.length}');
-    
-    // Prevent exceeds max tabs
-    if (state.tabs.length >= maxTabs) {
-      debugPrint('⚠️ Already at max tabs ($maxTabs), ignoring createNewTab');
-      return;
-    }
-    
-    // In fallback mode, only allow one tab
-    if (state.fallbackMode) {
-      state = state.copyWith(statusMessage: 'Install tmux for multiple tabs');
-      return;
-    }
-
-    if (state.tabs.length >= maxTabs) {
-      state = state.copyWith(statusMessage: 'Maximum $maxTabs tabs reached');
-      return;
-    }
-
-    if (!_tmuxService.isInitialized) {
-      state = state.copyWith(statusMessage: 'tmux not ready');
-      return;
-    }
-
-    final windowId = await _tmuxService.createWindow();
-    
-    if (windowId != null) {
-      debugPrint('   ✅ Created window $windowId');
-      await _createTabForWindow(windowId);
-      state = state.copyWith(statusMessage: null);
-    }
+    debugPrint('✅ Created tab for session $sessionIndex ($sessionName) [${terminalWidth}x$terminalHeight]${shouldSetActive ? ' (active)' : ''}');
   }
 
   Future<void> switchToTab(int index) async {
-    if (index >= 0 && index < state.tabs.length) {
-      final tab = state.tabs[index];
-      await _tmuxService.switchToWindow(tab.tmuxWindowId);
-      state = state.copyWith(activeTabIndex: index);
-    }
-  }
-
-  Future<void> closeTab(int index) async {
-    if (state.tabs.length <= 1) {
-      state = state.copyWith(statusMessage: 'Cannot close last tab');
+    debugPrint('🔄 switchToTab($index) - current: ${state.activeTabIndex}, tabs: ${state.tabs.length}');
+    
+    if (index < 0 || index >= state.tabs.length) {
+      debugPrint('❌ Invalid tab index: $index');
       return;
     }
-
-    final tab = state.tabs[index];
-    await _tmuxService.closeWindow(tab.tmuxWindowId);
     
-    final tabs = List<TerminalTab>.from(state.tabs);
-    tabs.removeAt(index);
-
-    int newActiveIndex = state.activeTabIndex;
-    if (index <= state.activeTabIndex) {
-      newActiveIndex = (state.activeTabIndex - 1).clamp(0, tabs.length - 1);
+    final tab = state.tabs[index];
+    
+    // Switch tmux session
+    await _tmuxService.switchToSession(tab.sessionIndex);
+    
+    // Update UI state
+    state = state.copyWith(activeTabIndex: index);
+    debugPrint('✅ Switched to session ${tab.sessionIndex}');
+  }
+  
+  Future<void> resetTerminal(int sessionIndex) async {
+    debugPrint('🔄 Resetting terminal session $sessionIndex...');
+    
+    if (sessionIndex < 0 || sessionIndex >= 3) {
+      debugPrint('❌ Invalid session index: $sessionIndex');
+      return;
     }
-
-    state = state.copyWith(
-      tabs: tabs,
-      activeTabIndex: newActiveIndex,
-      statusMessage: null,
-    );
+    
+    try {
+      final sessionName = TmuxService.sessionNames[sessionIndex];
+      
+      // Kill the tmux session
+      debugPrint('💀 Killing tmux session: $sessionName');
+      await _tmuxService._sshService.runCommandLenient('tmux kill-session -t $sessionName 2>&1');
+      
+      // Wait a moment for the session to fully close
+      await Future.delayed(const Duration(milliseconds: 500));
+      
+      // Clear the terminal display for this tab
+      final tabIndex = state.tabs.indexWhere((tab) => tab.sessionIndex == sessionIndex);
+      if (tabIndex >= 0) {
+        final tab = state.tabs[tabIndex];
+        tab.terminal.write('\x1b[2J\x1b[H'); // Clear screen and move cursor to top
+        debugPrint('🧹 Cleared terminal display for tab $tabIndex');
+      }
+      
+      // Re-create the session with current terminal dimensions
+      final tab = state.tabs[tabIndex];
+      debugPrint('🆕 Creating new tmux session: $sessionName (${tab.terminalWidth}x${tab.terminalHeight})');
+      final session = await _tmuxService._sshService.shell(
+        terminalWidth: tab.terminalWidth,
+        terminalHeight: tab.terminalHeight,
+      );
+      if (session == null) {
+        debugPrint('❌ Failed to create shell session');
+        return;
+      }
+      
+      // Start fresh tmux session
+      session.write(utf8.encode('tmux new-session -s $sessionName\n'));
+      
+      // Update the internal sessions array
+      _tmuxService._sessions[sessionIndex] = session;
+      
+      // Cancel old subscription
+      await _tmuxService._subscriptions[sessionIndex]?.cancel();
+      
+      // Set up new output listener
+      _tmuxService._subscriptions[sessionIndex] = session.stdout.listen(
+        (data) => _tmuxService._handleSessionOutput(sessionIndex, data),
+        onError: (error) {
+          debugPrint('❌ Session $sessionIndex error: $error');
+        },
+        onDone: () {
+          debugPrint('⚠️ Session $sessionIndex closed');
+          _tmuxService._sessions[sessionIndex] = null;
+        },
+      );
+      
+      // Listen to stderr only for logging errors (don't send to terminal display)
+      session.stderr.listen(
+        (data) {
+          final output = utf8.decode(data);
+          debugPrint('⚠️ Session $sessionIndex stderr: ${output.trim()}');
+        },
+        onError: (error) {
+          debugPrint('❌ Session $sessionIndex stderr error: $error');
+        },
+      );
+      
+      debugPrint('✅ Terminal session $sessionIndex reset successfully');
+      
+    } catch (e, stackTrace) {
+      debugPrint('❌ Error resetting terminal: $e');
+      debugPrint('Stack trace: $stackTrace');
+    }
   }
   
   Future<void> sendInput(String text) async {
-    if (state.fallbackMode) {
-      // Fallback mode: write directly to the shell session
-      final activeTab = state.activeTab;
-      if (activeTab?.shellSession != null) {
-        activeTab!.shellSession!.write(utf8.encode(text));
-      }
-    } else {
-      // tmux mode: use tmux service
-      if (!_tmuxService.isInitialized) return;
-      await _tmuxService.sendInput(text);
+    if (!_tmuxService.isInitialized) {
+      debugPrint('❌ Cannot send input: tmux not initialized');
+      return;
     }
+    
+    await _tmuxService.sendInput(text);
   }
 
   void clearStatusMessage() {
@@ -470,14 +966,19 @@ class TerminalScreen extends ConsumerStatefulWidget {
 class _TerminalScreenState extends ConsumerState<TerminalScreen> {
   final FocusNode _terminalFocus = FocusNode();
   final TextEditingController _terminalController = TextEditingController();
-  String _previousInput = '';
   bool _hasText = false;
   
-  bool _liquidGlassTabBarShown = false;
+  bool _liquidGlassTerminalTabsShown = false;
   bool _liquidGlassTerminalInputShown = false;
   bool _nativeKeyboardVisible = false;  // Track native iOS keyboard state
-  bool _isCreatingTab = false;  // Debounce flag for tab creation
   bool _isDisconnecting = false;  // Prevent multiple disconnect dialogs
+  
+  // Track what we've already sent to terminal for character-by-character sync
+  String _lastSentText = '';
+  
+  // Track last tab state to avoid unnecessary updates
+  int _lastActiveTabIndex = -1;
+  int _lastTabCount = 0;
   
   // Custom shortcuts
   List<Map<String, String>> _customShortcuts = [];
@@ -510,100 +1011,81 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       
       if (sshService.isConnected && 
           tabsState.tabs.isEmpty && 
-          !tabsState.tmuxReady && 
-          !tabsState.fallbackMode) {
+          !tabsState.tmuxReady) {
         debugPrint('🚀 SSH already connected, initializing terminal...');
         ref.read(terminalTabsProvider.notifier).initializeTmux();
       }
     });
     
-    // Listen to tab changes and update Liquid Glass tab bar
-    ref.listenManual(terminalTabsProvider, (previous, next) {
-      if (_liquidGlassTabBarShown) {
-        if (previous != null) {
-          final tabCountChanged = previous.tabs.length != next.tabs.length;
-          final activeIndexChanged = previous.activeTabIndex != next.activeTabIndex;
-          
-          if (tabCountChanged || activeIndexChanged) {
-            debugPrint('📊 Tabs changed: count ${previous.tabs.length} → ${next.tabs.length}, active ${previous.activeTabIndex} → ${next.activeTabIndex}');
-            // Update immediately - debounce is handled in onNewTab callback
-            if (mounted) {
-              _updateLiquidGlassTabBar();
-            }
-          }
-        }
-      }
-    });
+    // Tab changes are handled by Flutter UI now (state management via Riverpod)
   }
   
   Future<void> _initLiquidGlassComponents() async {
-    // Initialize Liquid Glass tab bar and terminal input (iOS 26+ only)
-    await _initLiquidGlassTabBar();
+    // Initialize Liquid Glass terminal tabs (iOS 26+ only)
+    await _initLiquidGlassTerminalTabs();
+    
+    // Initialize Liquid Glass terminal input (iOS 26+ only)
     await _initLiquidGlassTerminalInput();
   }
   
-  Future<void> _initLiquidGlassTabBar() async {
-    LiquidGlassTabBar.setCallbacks(
-      onTabSelected: (index) {
+  Future<void> _initLiquidGlassTerminalTabs() async {
+    final supported = await LiquidGlassTerminalTabs.isSupported();
+    if (!supported) {
+      debugPrint('❌ Liquid Glass terminal tabs not supported');
+      return;
+    }
+    
+    // Initialize callbacks
+    await LiquidGlassTerminalTabs.initialize(
+      onTabTapped: (index) {
+        debugPrint('🔘 Native tab $index tapped');
         ref.read(terminalTabsProvider.notifier).switchToTab(index);
       },
-      onTabClosed: (index) {
-        ref.read(terminalTabsProvider.notifier).closeTab(index);
-      },
-      onNewTab: () {
-        // Simple debounce: check flag and return immediately if already creating
-        if (_isCreatingTab) {
-          debugPrint('⚠️ Tab creation already in progress, ignoring');
-          return;
-        }
-        
-        final tabsState = ref.read(terminalTabsProvider);
-        if (tabsState.tabs.length >= TerminalTabsNotifier.maxTabs) {
-          debugPrint('⚠️ Already at max tabs, ignoring');
-          return;
-        }
-        
-        // Set flag IMMEDIATELY before async call
-        _isCreatingTab = true;
-        debugPrint('🆕 Tab creation started, flag set');
-        
-        // Create tab
-        ref.read(terminalTabsProvider.notifier).createNewTab();
-        
-        // Reset flag after 1 second (generous delay)
-        Future.delayed(const Duration(milliseconds: 1000), () {
-          if (mounted) {
-            _isCreatingTab = false;
-            debugPrint('✅ Tab creation flag reset');
-          }
-        });
+      onTabLongPressed: (index) {
+        debugPrint('👆 Native tab $index long pressed - resetting terminal');
+        // Reset directly without Flutter confirmation (Swift already shows the context menu)
+        ref.read(terminalTabsProvider.notifier).resetTerminal(index);
       },
     );
     
-    await _updateLiquidGlassTabBar();
+    // Show tabs with initial state
+    final tabsState = ref.read(terminalTabsProvider);
+    await LiquidGlassTerminalTabs.show(
+      activeTab: tabsState.activeTabIndex >= 0 ? tabsState.activeTabIndex : 0,
+      tabCount: tabsState.tabs.length,
+    );
     
-    if (mounted) {
-      setState(() {
-        _liquidGlassTabBarShown = true;
-      });
-    }
+    setState(() {
+      _liquidGlassTerminalTabsShown = true;
+    });
+    
+    debugPrint('✅ Liquid Glass terminal tabs initialized');
   }
   
   Future<void> _initLiquidGlassTerminalInput() async {
     // Initialize callbacks
     await LiquidGlassTerminalInput.initialize(
       onCommandSent: (text) {
-        // Send command with newline
-        _sendCommand('\r');
+        // Text has already been typed character-by-character into terminal
+        // Just send the enter key to submit it
+        ref.read(terminalTabsProvider.notifier).sendInput('\r');
+        
+        // Clear the input after sending
+        _terminalController.clear();
+        _lastSentText = ''; // Reset tracking
+        setState(() {
+          _hasText = false;
+        });
       },
       onInputChanged: (text) {
         // Sync text from native to Flutter controller
         if (_terminalController.text != text) {
           _terminalController.text = text;
-          _previousInput = text;
           setState(() {
             _hasText = text.trim().isNotEmpty;
           });
+          // Send the diff to terminal (character-by-character)
+          _syncTextToTerminal(text);
         }
       },
       onDismissKeyboard: () {
@@ -630,7 +1112,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     
     // Show the input
     final shown = await LiquidGlassTerminalInput.show(
-      placeholder: 'Type commands here...',
+      placeholder: 'Type command...',
     );
     
     if (shown && mounted) {
@@ -641,34 +1123,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     }
   }
   
-  Future<void> _updateLiquidGlassTabBar() async {
-    final tabsState = ref.read(terminalTabsProvider);
-    final tabs = tabsState.tabs.map((tab) => {
-      'id': tab.id,
-      'name': tab.name,
-    }).toList();
-    
-    final canAddTab = tabsState.tabs.length < TerminalTabsNotifier.maxTabs;
-    
-    debugPrint('🔄 Updating Liquid Glass tab bar: ${tabs.length} tabs, active: ${tabsState.activeTabIndex}, canAdd: $canAddTab');
-    debugPrint('   Tabs: ${tabs.map((t) => t['name']).join(', ')}');
-    
-    if (_liquidGlassTabBarShown) {
-      final result = await LiquidGlassTabBar.updateTabs(
-        tabs: tabs,
-        activeIndex: tabsState.activeTabIndex,
-        canAddTab: canAddTab,
-      );
-      debugPrint('   Update result: $result');
-    } else {
-      final result = await LiquidGlassTabBar.show(
-        tabs: tabs,
-        activeIndex: tabsState.activeTabIndex,
-        canAddTab: canAddTab,
-      );
-      debugPrint('   Show result: $result');
-    }
-  }
+  // Removed: _updateLiquidGlassTabBar - now using Flutter UI for tabs
   
   Future<void> _initLiquidGlassButtons() async {
     // Initialize Power button
@@ -676,6 +1131,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     
     // Initialize Info button
     await _initLiquidGlassInfoButton();
+    
+    // Initialize Play button
+    await _initLiquidGlassPlayButton();
   }
   
   Future<void> _initLiquidGlassPowerButton() async {
@@ -689,29 +1147,135 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
   }
   
   Future<void> _initLiquidGlassInfoButton() async {
-    // Set up callback for info button taps
-    LiquidGlassInfoButton.setOnInfoButtonTappedCallback(() async {
-      // Hide buttons before navigating
-      await LiquidGlassPowerButton.hide();
-      await LiquidGlassInfoButton.hide();
-      
-      if (mounted) {
-        await Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (context) => const InfoScreenFullPage(),
-          ),
-        );
-        
-        // Show buttons again when returning
-        if (mounted) {
-          await LiquidGlassPowerButton.show(isConnected: true);
-          await LiquidGlassInfoButton.show();
-        }
-      }
+    // Info button handles sheet natively in Swift - no callback needed
+    // Just show the button
+    await LiquidGlassInfoButton.show();
+  }
+  
+  Future<void> _initLiquidGlassPlayButton() async {
+    // Set up callback for play button taps (server detection & preview)
+    LiquidGlassPlayButton.setOnPlayButtonTappedCallback(() {
+      _handlePlayButtonTap();
     });
     
-    // Show the info button
-    await LiquidGlassInfoButton.show();
+    // Show the play button
+    await LiquidGlassPlayButton.show(isLoading: false);
+  }
+  
+  void _handlePlayButtonTap() async {
+    debugPrint('▶️ Play button tapped - checking for running server');
+    
+    // Update button to loading state
+    await LiquidGlassPlayButton.updateState(isLoading: true);
+    
+    // Strategy: Try terminal output first (most accurate), then scan
+    int? detectedPort = ref.read(detectedServerPortProvider);
+    debugPrint('🔍 Port from terminal output: $detectedPort');
+    
+    // If no port from terminal output, scan for running servers
+    if (detectedPort == null) {
+      debugPrint('🔍 No port from terminal output, scanning...');
+      final sshService = ref.read(sshServiceProvider.notifier);
+      detectedPort = await sshService.detectRunningServer();
+      debugPrint('🔍 Port from scan: $detectedPort');
+      
+      // Save the detected port for next time
+      if (detectedPort != null) {
+        ref.read(detectedServerPortProvider.notifier).state = detectedPort;
+      }
+    } else {
+      debugPrint('✅ Using port from terminal output: $detectedPort');
+      
+      // Verify this port is actually still open before using it
+      final sshService = ref.read(sshServiceProvider);
+      final stillOpen = await sshService.checkSpecificPort(detectedPort);
+      
+      if (!stillOpen) {
+        debugPrint('⚠️ Port $detectedPort from terminal is no longer open, scanning...');
+        detectedPort = await sshService.detectRunningServer();
+        debugPrint('🔍 Port from scan: $detectedPort');
+        
+        if (detectedPort != null) {
+          ref.read(detectedServerPortProvider.notifier).state = detectedPort;
+        }
+      }
+    }
+    
+    // Reset button state
+    await LiquidGlassPlayButton.updateState(isLoading: false);
+    
+    if (detectedPort == null) {
+      // No server detected - show snackbar
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text(
+              'No server detected. Start your dev server in the terminal to preview.',
+              style: TextStyle(color: Colors.white),
+            ),
+            backgroundColor: Colors.orange,
+            behavior: SnackBarBehavior.floating,
+            margin: EdgeInsets.only(
+              bottom: MediaQuery.of(context).size.height - 200,
+              left: 20,
+              right: 20,
+            ),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+      return;
+    }
+    
+    // Server detected - get host IP and navigate to preview
+    final hostIp = ref.read(sshServiceProvider).hostIp;
+    if (hostIp == null) {
+      debugPrint('❌ Host IP is null');
+      return;
+    }
+    
+    final previewUrl = 'http://$hostIp:$detectedPort';
+    debugPrint('✅ Opening preview: $previewUrl');
+    
+    // Hide terminal UI before navigating
+    if (_liquidGlassTerminalTabsShown) {
+      await LiquidGlassTerminalTabs.hide();
+    }
+    if (_liquidGlassTerminalInputShown) {
+      await LiquidGlassTerminalInput.hide();
+    }
+    await LiquidGlassPowerButton.hide();
+    await LiquidGlassInfoButton.hide();
+    await LiquidGlassPlayButton.hide();
+    
+    // Navigate to WebPreview screen
+    if (mounted) {
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (context) => WebPreviewScreen(
+            url: previewUrl,
+            hostIp: hostIp,
+          ),
+        ),
+      );
+      
+      // When returning from Preview, restore terminal UI elements
+      if (mounted) {
+        await LiquidGlassPowerButton.show(isConnected: true);
+        await LiquidGlassInfoButton.show();
+        await LiquidGlassPlayButton.show(isLoading: false);
+        if (_liquidGlassTerminalTabsShown) {
+          final tabsState = ref.read(terminalTabsProvider);
+          await LiquidGlassTerminalTabs.show(
+            activeTab: tabsState.activeTabIndex >= 0 ? tabsState.activeTabIndex : 0,
+            tabCount: tabsState.tabs.length,
+          );
+        }
+        if (_liquidGlassTerminalInputShown) {
+          await LiquidGlassTerminalInput.show(placeholder: 'Type command...');
+        }
+      }
+    }
   }
   
   void _handlePowerButtonTap() {
@@ -786,15 +1350,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     _terminalFocus.dispose();
     _terminalController.dispose();
     
-    // Hide terminal-specific UI (tabs and input)
-    if (_liquidGlassTabBarShown) {
-      LiquidGlassTabBar.hide();
+    // Hide native components
+    if (_liquidGlassTerminalTabsShown) {
+      LiquidGlassTerminalTabs.hide();
     }
     if (_liquidGlassTerminalInputShown) {
       LiquidGlassTerminalInput.hide();
     }
     
-    // Keep Power and Info buttons visible - they persist across SSH/Terminal screens
+    // Keep Power, Info, and Play buttons visible - they persist across SSH/Terminal screens
     // They will be managed by the SSH screen when we navigate back
     
     super.dispose();
@@ -802,8 +1366,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
 
   void _handleInputChange() {
     final current = _terminalController.text;
-    final oldLen = _previousInput.length;
-    final newLen = current.length;
 
     // Update button state
     final hasText = current.trim().isNotEmpty;
@@ -818,16 +1380,33 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       LiquidGlassTerminalInput.setText(current);
     }
 
-    if (newLen > oldLen) {
-      final added = current.substring(oldLen);
-      ref.read(terminalTabsProvider.notifier).sendInput(added);
-    } else if (newLen < oldLen) {
-      for (int i = 0; i < oldLen - newLen; i++) {
-        ref.read(terminalTabsProvider.notifier).sendInput('\x7f');
+    // Sync character-by-character to terminal
+    _syncTextToTerminal(current);
+  }
+  
+  /// Sync text to terminal character-by-character
+  /// Only sends the difference between what's typed and what's already been sent
+  void _syncTextToTerminal(String currentText) {
+    // If text is shorter (user deleted), we can't unsend characters
+    // So we need to handle backspace specially
+    if (currentText.length < _lastSentText.length) {
+      // User deleted characters - send backspace
+      final numDeleted = _lastSentText.length - currentText.length;
+      for (int i = 0; i < numDeleted; i++) {
+        ref.read(terminalTabsProvider.notifier).sendInput('\x7f'); // Backspace (DEL)
       }
+      _lastSentText = currentText;
+    } else if (currentText.length > _lastSentText.length) {
+      // User added characters - send the new characters
+      final newChars = currentText.substring(_lastSentText.length);
+      
+      // Debug: Log what we're sending
+      debugPrint('📝 Sending to terminal: "$newChars" (length: ${newChars.length})');
+      
+      ref.read(terminalTabsProvider.notifier).sendInput(newChars);
+      _lastSentText = currentText;
     }
-
-    _previousInput = current;
+    // If lengths are equal, text is the same (no change)
   }
 
   Future<void> _loadCustomShortcuts() async {
@@ -863,31 +1442,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
   }
 
   void _sendCommand(String command) {
-    final tabsState = ref.read(terminalTabsProvider);
-    final activeTab = tabsState.activeTab;
-    if (activeTab == null) return;
-
-    if (tabsState.fallbackMode && activeTab.shellSession != null) {
-      // Fallback mode: write directly to shell session
-      activeTab.shellSession!.write(utf8.encode('$command\r'));
-    } else {
-      // tmux mode
-      ref.read(terminalTabsProvider.notifier).sendInput('$command\r');
-    }
+    ref.read(terminalTabsProvider.notifier).sendInput('$command\r');
   }
 
   void _sendKeys(String sequence) {
-    final tabsState = ref.read(terminalTabsProvider);
-    final activeTab = tabsState.activeTab;
-    if (activeTab == null) return;
-
-    if (tabsState.fallbackMode && activeTab.shellSession != null) {
-      // Fallback mode: write directly to shell session
-      activeTab.shellSession!.write(utf8.encode(sequence));
-    } else {
-      // tmux mode
-      ref.read(terminalTabsProvider.notifier).sendInput(sequence);
-    }
+    ref.read(terminalTabsProvider.notifier).sendInput(sequence);
   }
 
   @override
@@ -911,9 +1470,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       );
     }
 
-    // Show loading only if neither tmux nor fallback is ready AND we have no tabs
-    if (!tabsState.tmuxReady && !tabsState.fallbackMode && activeTab == null) {
-      // Regular loading state
+    // Show tmux requirement screen if tmux not installed
+    if (tabsState.statusMessage == 'tmux_required') {
+      return _buildTmuxRequirementScreen();
+    }
+
+    // Show loading while initializing
+    if (!tabsState.tmuxReady && activeTab == null) {
       return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -924,7 +1487,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
             const SizedBox(height: 16),
             Text(
               tabsState.statusMessage ?? 'Setting up terminal...',
-              style: const TextStyle(color: Colors.grey, fontSize: 16),
+              style: const TextStyle(
+                color: Colors.grey,
+                fontSize: 16,
+                decoration: TextDecoration.none,
+              ),
               textAlign: TextAlign.center,
             ),
           ],
@@ -932,27 +1499,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       );
     }
 
-    // In fallback mode, show loading until tab is created
-    if (tabsState.fallbackMode && activeTab == null) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const CircularProgressIndicator(
-              valueColor: AlwaysStoppedAnimation<Color>(Colors.white70),
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'Opening terminal...',
-              style: TextStyle(color: Colors.grey, fontSize: 16),
-              textAlign: TextAlign.center,
-            ),
-          ],
-        ),
-      );
-    }
-
-    // If we somehow have no active tab but should have one, show error
+    // Error state
     if (activeTab == null) {
       return Center(
         child: Column(
@@ -975,32 +1522,38 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       );
     }
 
-    // Update liquid glass tab bar when tabs change
-    if (_liquidGlassTabBarShown) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _updateLiquidGlassTabBar();
-      });
-    }
+    // Tab bar updates are automatic via Flutter state management (Riverpod)
 
+    // Update native tabs ONLY when tab state actually changes
+    if (_liquidGlassTerminalTabsShown) {
+      final currentActiveTab = tabsState.activeTabIndex >= 0 ? tabsState.activeTabIndex : 0;
+      final currentTabCount = tabsState.tabs.length;
+      
+      if (currentActiveTab != _lastActiveTabIndex || currentTabCount != _lastTabCount) {
+        _lastActiveTabIndex = currentActiveTab;
+        _lastTabCount = currentTabCount;
+        
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          LiquidGlassTerminalTabs.updateTabs(
+            activeTab: currentActiveTab,
+            tabCount: currentTabCount,
+          );
+        });
+      }
+    }
+    
     return Scaffold(
       backgroundColor: const Color(0xFF0a0a0a),
       resizeToAvoidBottomInset: true,
       body: SafeArea(
         child: Column(
           children: [
-            // Spacing for liquid glass tab bar (always present on iOS 26+)
-            const SizedBox(height: 60),
-
-            // Show tmux success banner
-            if (tabsState.statusMessage == 'tmux_success')
-              _buildSuccessBanner(),
+            // Native tabs are shown via Swift/iOS - no Flutter tab bar needed
+            // Add spacing where native tabs appear
+            if (_liquidGlassTerminalTabsShown)
+              const SizedBox(height: 64), // Space for native tab bar
             
-            // Show tmux install banner if in fallback mode
-            if (tabsState.fallbackMode && tabsState.statusMessage != null && 
-                tabsState.statusMessage!.startsWith('tmux_not_installed:'))
-              _buildTmuxBanner(ref, tabsState.statusMessage!),
-
-            // Terminal display
+            // Terminal display - back to full height for Qwen UI
             Expanded(
               child: Container(
                 color: const Color(0xFF0a0a0a), // Match app background
@@ -1014,6 +1567,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                         activeTab.terminal,
                         padding: const EdgeInsets.all(8),
                         backgroundOpacity: 0, // Make xterm background transparent
+                        textStyle: const TerminalStyle(fontSize: 14), // Larger font for mobile
                       ),
                     ),
                     // Invisible text field for input
@@ -1040,11 +1594,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
               ),
             ),
 
-            // Keyboard shortcuts - sits above input (Flutter or Liquid Glass)
+            // Keyboard shortcuts - sits directly above terminal input
             Padding(
               padding: EdgeInsets.only(
                 bottom: _liquidGlassTerminalInputShown 
-                  ? (_nativeKeyboardVisible ? 60 : 110)  // 60px when keyboard open, 110px when closed
+                  ? (_nativeKeyboardVisible ? 52 : 52)  // Always 52px above input (8px safe area bottom + 44px input height)
                   : 0,
               ),
               child: Container(
@@ -1056,6 +1610,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                     children: [
                       _buildShortcutButton('tab', '\t'),
                       _buildShortcutButton('esc', '\x1b'),
+                      _buildShortcutButton('ctrl', 'ctrl'), // Special handling for ctrl combinations
                       _buildShortcutButton('↑', '\x1b[A'),
                       _buildShortcutButton('↓', '\x1b[B'),
                       _buildShortcutButton('←', '\x1b[D'),
@@ -1155,7 +1710,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                           ? () {
                               _sendCommand('\r');
                               _terminalController.clear();
-                              _previousInput = '';
                               setState(() {
                                 _hasText = false;
                               });
@@ -1169,7 +1723,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                   onSubmitted: (value) {
                     _sendCommand('\r');
                     _terminalController.clear();
-                    _previousInput = '';
                     FocusScope.of(context).unfocus();
                   },
                 ),
@@ -1181,110 +1734,142 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     );
   }
 
-  Widget _buildSuccessBanner() {
-    return Container(
-      color: Colors.green[700],
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Row(
-        children: [
-          const Icon(Icons.check_circle, color: Colors.white, size: 20),
-          const SizedBox(width: 12),
-          const Expanded(
-            child: Text(
-              '✨ Persistent sessions enabled!',
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-                fontSize: 13,
-              ),
-            ),
-          ),
-          IconButton(
-            onPressed: () {
-              ref.read(terminalTabsProvider.notifier).clearStatusMessage();
-            },
-            icon: const Icon(
-              Icons.close,
-              color: Colors.white,
-              size: 20,
-            ),
-            splashRadius: 20,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(),
-          ),
-        ],
-      ),
-    );
-  }
 
-  Widget _buildTmuxBanner(WidgetRef ref, String statusMessage) {
-    final osTypeName = statusMessage.split(':')[1];
-    final osType = TmuxCheckResult.values.firstWhere(
-      (e) => e.name == osTypeName,
-      orElse: () => TmuxCheckResult.notInstalledUnknown,
-    );
-
+  Widget _buildTmuxRequirementScreen() {
     return Container(
-      color: Colors.orange[900],
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          const Icon(Icons.info_outline, color: Colors.white, size: 20),
-          const SizedBox(width: 12),
-          Expanded(
+      color: const Color(0xFF0a0a0a),
+      child: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32.0),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
+                // Icon
+                const Icon(
+                  CupertinoIcons.square_stack_3d_up,
+                  color: Colors.blue,
+                  size: 64,
+                ),
+                const SizedBox(height: 32),
+                
+                // Title
                 const Text(
-                  'Install tmux for persistent sessions',
+                  'tmux Required',
                   style: TextStyle(
                     color: Colors.white,
+                    fontSize: 28,
                     fontWeight: FontWeight.bold,
+                    decoration: TextDecoration.none,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 16),
+                
+                // Description
+                const Text(
+                  'This app uses tmux for persistent terminal sessions.\n\n'
+                  'Install tmux on your server to continue:',
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 16,
+                    height: 1.5,
+                    decoration: TextDecoration.none,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 32),
+                
+                // Install commands - simplified to Mac and Linux
+                _buildInstallCommand('macOS', 'brew install tmux'),
+                _buildInstallCommand('Linux', 'sudo apt install tmux'),
+                const SizedBox(height: 8),
+                Text(
+                  'Other distributions: yum, dnf, pacman, etc.',
+                  style: TextStyle(
+                    color: Colors.grey[600],
                     fontSize: 13,
+                    fontStyle: FontStyle.italic,
+                    decoration: TextDecoration.none,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                
+                const SizedBox(height: 32),
+                
+                // Retry button - now continuously checks until tmux is found
+                ElevatedButton(
+                  onPressed: () async {
+                    // Start continuous checking
+                    final notifier = ref.read(terminalTabsProvider.notifier);
+                    await notifier.initializeTmux(forceRetry: true);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                  ),
+                  child: const Text(
+                    'Retry Connection',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                   ),
                 ),
-                const SizedBox(height: 2),
+                const SizedBox(height: 12),
                 Text(
-                  'Type: ${_getTmuxInstallCommand(osType)}',
-                  style: const TextStyle(
-                    color: Colors.white70,
-                    fontSize: 11,
-                    fontFamily: 'monospace',
+                  'Install tmux and click Retry',
+                  style: TextStyle(
+                    color: Colors.grey[600],
+                    fontSize: 14,
+                    decoration: TextDecoration.none,
                   ),
+                  textAlign: TextAlign.center,
                 ),
               ],
             ),
           ),
-          IconButton(
-            onPressed: () {
-              ref.read(terminalTabsProvider.notifier).initializeTmux();
-            },
-            icon: const Icon(
-              CupertinoIcons.refresh,
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildInstallCommand(String os, String command) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            os,
+            style: const TextStyle(
               color: Colors.white,
-              size: 20,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              decoration: TextDecoration.none,
             ),
-            splashRadius: 20,
+          ),
+          const SizedBox(height: 4),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.05),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.white.withValues(alpha:0.1)),
+            ),
+            child: Text(
+              command,
+              style: const TextStyle(
+                color: Colors.blue,
+                fontSize: 13,
+                fontFamily: 'monospace',
+                fontWeight: FontWeight.w500,
+                decoration: TextDecoration.none,
+              ),
+            ),
           ),
         ],
       ),
     );
-  }
-
-  String _getTmuxInstallCommand(TmuxCheckResult osType) {
-    switch (osType) {
-      case TmuxCheckResult.notInstalledUbuntu:
-        return 'sudo apt-get install tmux';
-      case TmuxCheckResult.notInstalledCentos:
-        return 'sudo yum install tmux';
-      case TmuxCheckResult.notInstalledMac:
-        return 'brew install tmux';
-      case TmuxCheckResult.notInstalledArch:
-        return 'sudo pacman -S tmux';
-      default:
-        return 'tmux (see server docs)';
-    }
   }
 
   Widget _buildShortcutButton(String text, String sequence, {VoidCallback? onTap}) {
@@ -1295,7 +1880,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
         borderRadius: BorderRadius.circular(6),
         child: InkWell(
           borderRadius: BorderRadius.circular(6),
-          onTap: onTap ?? () => _sendKeys(sequence),
+          onTap: onTap ?? () {
+            // Special handling for Ctrl key
+            if (sequence == 'ctrl') {
+              _showCtrlMenu();
+            } else {
+              _sendKeys(sequence);
+            }
+          },
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: Text(
@@ -1444,6 +2036,77 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  void _showCtrlMenu() {
+    final ctrlCommands = [
+      {'key': 'Ctrl+C', 'sequence': '\x03', 'description': 'Interrupt (cancel current process)'},
+      {'key': 'Ctrl+D', 'sequence': '\x04', 'description': 'EOF (exit shell or end input)'},
+      {'key': 'Ctrl+Z', 'sequence': '\x1a', 'description': 'Suspend process (send to background)'},
+      {'key': 'Ctrl+L', 'sequence': '\x0c', 'description': 'Clear screen'},
+      {'key': 'Ctrl+A', 'sequence': '\x01', 'description': 'Move cursor to beginning of line'},
+      {'key': 'Ctrl+E', 'sequence': '\x05', 'description': 'Move cursor to end of line'},
+      {'key': 'Ctrl+U', 'sequence': '\x15', 'description': 'Delete from cursor to start of line'},
+      {'key': 'Ctrl+K', 'sequence': '\x0b', 'description': 'Delete from cursor to end of line'},
+      {'key': 'Ctrl+W', 'sequence': '\x17', 'description': 'Delete word before cursor'},
+      {'key': 'Ctrl+R', 'sequence': '\x12', 'description': 'Reverse search command history'},
+    ];
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1a1a1a),
+        title: const Text(
+          'Ctrl Shortcuts',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Tap to send control sequence',
+                style: TextStyle(color: Colors.grey[400], fontSize: 14),
+              ),
+              const SizedBox(height: 16),
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: ctrlCommands.length,
+                  itemBuilder: (context, index) {
+                    final cmd = ctrlCommands[index];
+                    return ListTile(
+                      title: Text(
+                        cmd['key']!,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      subtitle: Text(
+                        cmd['description']!,
+                        style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                      ),
+                      onTap: () {
+                        Navigator.pop(context);
+                        _sendKeys(cmd['sequence']!);
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close', style: TextStyle(color: Colors.blue)),
+          ),
+        ],
       ),
     );
   }
