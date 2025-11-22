@@ -137,17 +137,17 @@ class InfoScreen extends StatelessWidget {
                 children: [
                   _PolicyLink(
                     title: 'Privacy',
-                    onTap: () => _launchURL('https://willbarksdale.github.io/v-policy/privacy.html'),
+                    onTap: () => _launchURL('https://willbarksdale.github.io/v/privacy.html'),
                   ),
                   const SizedBox(width: 24),
                   _PolicyLink(
                     title: 'Terms',
-                    onTap: () => _launchURL('https://willbarksdale.github.io/v-policy/terms.html'),
+                    onTap: () => _launchURL('https://willbarksdale.github.io/v/terms.html'),
                   ),
                   const SizedBox(width: 24),
                   _PolicyLink(
                     title: 'Support',
-                    onTap: () => _launchURL('https://willbarksdale.github.io/v-policy/support.html'),
+                    onTap: () => _launchURL('https://willbarksdale.github.io/v/support.html'),
                   ),
                 ],
               ),

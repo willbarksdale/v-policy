@@ -279,15 +279,15 @@ struct InfoSheetView: View {
                     
                     // Policy links
                     HStack(spacing: 24) {
-                        Link("Privacy", destination: URL(string: "https://willbarksdale.github.io/v-policy/privacy.html")!)
+                        Link("Privacy", destination: URL(string: "https://willbarksdale.github.io/v/privacy.html")!)
                             .font(.system(size: 14, weight: .bold))
                             .foregroundStyle(.white.opacity(0.7))
                         
-                        Link("Terms", destination: URL(string: "https://willbarksdale.github.io/v-policy/terms.html")!)
+                        Link("Terms", destination: URL(string: "https://willbarksdale.github.io/v/terms.html")!)
                             .font(.system(size: 14, weight: .bold))
                             .foregroundStyle(.white.opacity(0.7))
                         
-                        Link("Support", destination: URL(string: "https://willbarksdale.github.io/v-policy/support.html")!)
+                        Link("Support", destination: URL(string: "https://willbarksdale.github.io/v/support.html")!)
                             .font(.system(size: 14, weight: .bold))
                             .foregroundStyle(.white.opacity(0.7))
                     }

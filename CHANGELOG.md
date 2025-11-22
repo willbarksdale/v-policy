@@ -377,7 +377,7 @@ Instead:
 - Your server data
 - Your keystrokes
 
-Full privacy policy: https://willbarksdale.github.io/v-policy/privacy.html
+Full privacy policy: https://willbarksdale.github.io/v/privacy.html
 
 ---
 
@@ -418,8 +418,8 @@ Full privacy policy: https://willbarksdale.github.io/v-policy/privacy.html
 - **Repository**: https://github.com/willbarksdale/v
 - **Issues**: https://github.com/willbarksdale/v/issues
 - **Security**: Use GitHub Security Advisories (preferred)
-- **Support**: https://willbarksdale.github.io/v-policy/support.html
-- **Privacy**: https://willbarksdale.github.io/v-policy/privacy.html
+- **Support**: https://willbarksdale.github.io/v/support.html
+- **Privacy**: https://willbarksdale.github.io/v/privacy.html
 
 ---
 
