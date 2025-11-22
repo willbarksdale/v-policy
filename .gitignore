@@ -4,6 +4,7 @@
 *.pyc
 *.swp
 .DS_Store
+**/.DS_Store
 .atom/
 .build/
 .buildlog/
@@ -11,6 +12,9 @@
 .svn/
 .swiftpm/
 migrate_working_dir/
+.env
+.env.*
+devtools_options.yaml
 
 # IntelliJ related
 *.iml
@@ -50,6 +54,12 @@ app.*.map.json
 # iOS build artifacts
 ios/Runner.xcarchive/
 ios/ExportOptions.plist
+
+# Platform folders (iOS-only project)
+/android/
+/linux/
+/windows/
+/web/
 
 # Policy files (separate repo)
 v-policy/

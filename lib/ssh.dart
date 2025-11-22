@@ -667,11 +667,10 @@ class SshService extends ChangeNotifier {
     return await _client!.sftp();
   }
 
-  // DEPRECATED: These methods are from the old file tree editor
-  // They are no longer used since we simplified the edit screen
-  // Keeping them commented out in case we need them later
+  // DEPRECATED: Legacy file tree editor methods (removed - no longer needed)
+  // File management simplified to terminal-only workflow
   
-  /*
+  /* REMOVED - Old SFTP file browser code
   Future<List<FileSystemEntity>> listDirectory(String path) async {
     if (!isConnected) {
       throw Exception('Not connected to SSH server');

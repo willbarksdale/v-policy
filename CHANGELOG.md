@@ -1,11 +1,14 @@
-# Changelog
+# v - Release History & Documentation
 
-All notable changes to this project will be documented in this file.
+**App:** v - Mobile Terminal & AI CLI  
+**Platform:** iOS 26.0+  
+**Last Updated:** January 22, 2025
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+This file documents all notable changes, technical notes, and security information.
 
 ---
+
+# Changelog
 
 ## [Unreleased]
 
@@ -93,9 +96,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## Technical Notes
+# Technical Documentation
 
-### tmux Detection Fix Details
+## tmux Detection Fix
+
 **Problem**: Opening 3 separate SSH channels for detection (`tmux -V`, `which tmux`, `command -v tmux`) caused channel exhaustion on servers with low channel limits, leading to `SSHChannelOpenError`.
 
 **Solution**: Consolidated into single compound command:
@@ -113,9 +117,11 @@ echo "NOT_FOUND"
 - Case-insensitive output parsing
 - Handles network latency gracefully
 
-### AI CLI Integration Fix Details
+---
 
-#### **Problem 1: UI Duplication**
+## AI CLI Integration
+
+### Problem 1: UI Duplication
 AI CLI tools (Qwen, Gemini) would duplicate their ASCII art logos and UI elements, creating visual artifacts.
 
 **Root Cause**: PTY terminal width (120 cols) was much wider than iPhone portrait display (~40 chars), causing text to wrap and overlap when rendered.
@@ -130,7 +136,7 @@ AI CLI tools (Qwen, Gemini) would duplicate their ASCII art logos and UI element
 
 ---
 
-#### **Problem 2: No Response After Sending Message**
+### Problem 2: No Response After Sending Message
 Qwen CLI would show "Initializing..." but never display the AI's response. Terminal appeared stuck.
 
 **Root Cause**: We were sending complete messages at once (`"hello world\r"`), but Qwen CLI has its OWN input field that expects character-by-character typing (like a real keyboard).
@@ -172,7 +178,7 @@ onCommandSent: (text) {
 
 ---
 
-#### **Why Character-by-Character Matters**
+### Why Character-by-Character Matters
 
 AI CLI tools like Qwen/Gemini have interactive TUIs (Text User Interfaces) with their own input fields:
 ```
@@ -191,7 +197,7 @@ Sending bulk text breaks this flow - they don't know how to handle it.
 
 ---
 
-#### **Problem 3: UTF-8 Decoding Errors (Discovered 2025-01-21)**
+### Problem 3: UTF-8 Decoding Errors
 
 After fixing character-by-character input, diagnostic logs revealed NO duplication in our code pipeline. However, `FormatException` errors appeared:
 
@@ -228,6 +234,177 @@ void _handleSessionOutput(int sessionIndex, List<int> data) {
 
 ---
 
+# Security Documentation
+
+**Status:** ✅ Cleared for App Store Deployment  
+**Audit Date:** January 22, 2025
+
+## Security Overview
+
+**v** is designed with privacy and security as core principles:
+
+- ✅ **No Backend** - All data stays on your device and your SSH server
+- ✅ **Direct SSH** - No intermediary servers or proxies  
+- ✅ **iOS Keychain Encryption** - Passwords/keys encrypted at hardware level
+- ✅ **Local-Only Storage** - Credentials never leave your device
+- ✅ **No Analytics** - Zero tracking or telemetry
+- ✅ **BYOS (Bring Your Own Server)** - You control everything
+
+---
+
+## Pre-Release Security Audit (v1.1.0)
+
+### ✅ **CLEARED - No Critical Vulnerabilities**
+
+**Overall Risk:** **LOW**
+
+### Audited Areas:
+1. ✅ **Credential Storage** - iOS Keychain encryption (SECURE)
+2. ✅ **SSH Connections** - Industry-standard `dartssh2` library (SECURE)
+3. ✅ **Network Permissions** - Properly declared, no excessive access (APPROPRIATE)
+4. ✅ **Hardcoded Secrets** - None found (CLEAN)
+5. ✅ **Input Validation** - Form validation, safe SSH execution (ADEQUATE)
+6. ✅ **File Permissions** - iOS sandboxed, no sensitive data in shared storage (SECURE)
+7. ✅ **Third-Party Dependencies** - All official packages, no known CVEs (LOW RISK)
+
+### Key Security Features:
+- **Passwords/SSH Keys**: Stored in iOS Keychain (hardware-backed encryption)
+- **IP/Username**: Stored in SharedPreferences (local plist, app-sandboxed)
+- **Data Isolation**: Each device stores its own credentials independently
+- **No Cross-Contamination**: User A's credentials cannot appear for User B
+- **SSH Encryption**: End-to-end encrypted connections via SSH protocol
+- **No Data Transmission**: App does not send data to any third parties
+
+### Minor Recommendations (Non-Blocking):
+- 🟡 Implement stateful UTF-8 decoder for AI CLI box-drawing characters
+- 🟡 Add IP address format validation regex (low priority)
+
+---
+
+## Supported Versions
+
+| Version | Supported | Notes |
+|---------|-----------|-------|
+| 1.1.x   | ✅ Yes    | Current - iOS 26.0+ |
+| 1.0.x   | ⚠️ Limited | Security patches only |
+| < 1.0   | ❌ No     | End of life |
+
+---
+
+## Reporting a Vulnerability
+
+### 🔒 **DO NOT** Open a Public Issue
+
+Instead:
+
+1. **Create a Private Security Advisory** on GitHub:
+   - Go to repository → Security → Advisories → Report a vulnerability
+   
+2. **Include**:
+   - Description of the vulnerability
+   - Steps to reproduce
+   - iOS version and app version
+   - Potential impact
+   - Suggested fix (if you have one)
+
+### Response Timeline
+
+- **Acknowledgment**: Within 48 hours
+- **Initial Assessment**: Within 7 days
+- **Fix Timeline** (depends on severity):
+  - 🔴 **Critical**: 24-48 hours
+  - 🟠 **High**: 1-2 weeks
+  - 🟡 **Medium**: 2-4 weeks
+  - 🟢 **Low**: Next release cycle
+
+---
+
+## Security Testing Focus Areas
+
+### High Priority:
+- 🔑 **SSH Credential Handling** - Storage, encryption, transmission
+- 🔒 **Authentication** - Password/key-based auth security
+- 🌐 **Network Security** - SSH connection encryption, MITM protection
+- 📦 **Data Storage** - iOS Keychain usage, SharedPreferences security
+
+### Medium Priority:
+- ⌨️ **Terminal Command Injection** - Input sanitization
+- 📁 **File Access** - iOS sandbox compliance
+- 🔌 **SSH Session Management** - Connection lifecycle, reconnection security
+
+### Low Priority:
+- 🎨 **UI/UX Security** - Credential masking, secure display
+- 📊 **Debug Logging** - Ensure no sensitive data in logs (production)
+
+---
+
+## Known Security Considerations
+
+### ✅ **By Design (Not Vulnerabilities)**
+
+1. **`NSAllowsArbitraryLoads: true`**
+   - **Why**: Users connect to self-hosted SSH servers with unknown certificates
+   - **Mitigation**: SSH protocol provides encryption; user controls which servers to trust
+   
+2. **`UIFileSharingEnabled: true`**
+   - **Why**: Users may want to access terminal logs via Files app
+   - **Mitigation**: No credentials stored in shared Documents folder (iOS Keychain only)
+
+3. **Local Network Access**
+   - **Why**: SSH connections to local/remote dev servers
+   - **Mitigation**: User explicitly enters server IP; no automatic discovery
+
+---
+
+## Privacy Statement
+
+**v** respects your privacy:
+
+- ❌ **No Analytics** - We don't track your usage
+- ❌ **No Telemetry** - We don't collect device/performance data
+- ❌ **No Third-Party APIs** - We don't send data anywhere
+- ❌ **No Ads** - We don't monetize your data
+- ❌ **No Cloud Sync** - Your credentials stay on your device
+
+**What we store locally:**
+- SSH server IP, port, username (SharedPreferences)
+- Passwords, SSH keys, passphrases (iOS Keychain - encrypted)
+- Custom terminal shortcuts (SharedPreferences)
+
+**What never leaves your device:**
+- Your SSH credentials
+- Your terminal commands
+- Your server data
+- Your keystrokes
+
+Full privacy policy: https://willbarksdale.github.io/v-policy/privacy.html
+
+---
+
+## User Security Best Practices
+
+1. ✅ **Use SSH Key Authentication** instead of passwords when possible
+2. ✅ **Strong Passphrases** for SSH keys (if using key-based auth)
+3. ✅ **Keep Your Server Updated** with latest security patches
+4. ✅ **Use VPN on Public WiFi** when connecting to remote servers
+5. ✅ **Monitor Server Logs** for suspicious activity
+6. ✅ **Regular Backups** of your projects and server data
+7. ✅ **Enable 2FA** on your server if supported
+8. ✅ **Unique Passwords** - Don't reuse SSH passwords
+
+---
+
+## Compliance & Standards
+
+**v** adheres to:
+
+- ✅ **Apple App Store Guidelines** (Section 2.5.1, 5.1.1, 5.1.2)
+- ✅ **iOS Security Best Practices** (Keychain, sandboxing)
+- ✅ **SSH Protocol Standards** (RFC 4251-4254)
+- ✅ **GDPR Principles** (no data collection = no GDPR concerns)
+
+---
+
 ## Versioning Guide
 
 - **Major** (X.0.0): Breaking changes or major feature overhauls
@@ -236,8 +413,14 @@ void _handleSessionOutput(int sessionIndex, List<int> data) {
 
 ---
 
-## Links
-- [Repository](https://github.com/willbarksdale/v)
-- [Issues](https://github.com/willbarksdale/v/issues)
-- [Contributing](CONTRIBUTING.md)
+## Links & Contact
 
+- **Repository**: https://github.com/willbarksdale/v
+- **Issues**: https://github.com/willbarksdale/v/issues
+- **Security**: Use GitHub Security Advisories (preferred)
+- **Support**: https://willbarksdale.github.io/v-policy/support.html
+- **Privacy**: https://willbarksdale.github.io/v-policy/privacy.html
+
+---
+
+**Thank you for using v and helping keep our community safe!** 🔒🚀
