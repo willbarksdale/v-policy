@@ -8,11 +8,34 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'terminal.dart';
-import 'main.dart';
+import 'preview.dart';
 
 // ============================================================================
 // LIQUID GLASS - SSH Components (Native iOS)
 // ============================================================================
+
+/// Toast notification (bottom)
+class LiquidGlassToast {
+  static const MethodChannel _channel = MethodChannel('liquid_glass_toast');
+  
+  static Future<bool> show({
+    required String message,
+    String style = 'info', // 'success', 'error', 'info'
+    double duration = 2.0,
+  }) async {
+    try {
+      final bool? result = await _channel.invokeMethod('show', {
+        'message': message,
+        'style': style,
+        'duration': duration,
+      });
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error showing toast: $e');
+      return false;
+    }
+  }
+}
 
 /// Power button for SSH connection control
 class LiquidGlassPowerButton {
@@ -60,9 +83,49 @@ class LiquidGlassPowerButton {
     }
   }
   
+  static Future<bool> showDisconnectAlert() async {
+    try {
+      final bool? result = await _channel.invokeMethod('showDisconnectAlert');
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error showing disconnect alert: $e');
+      return false;
+    }
+  }
+  
+  // Store callbacks internally
+  static VoidCallback? _onPowerButtonTapped;
+  static VoidCallback? _onDisconnectConfirmed;
+  static VoidCallback? _onDisconnectCancelled;
+  
   static void setOnPowerButtonTappedCallback(VoidCallback callback) {
+    _onPowerButtonTapped = callback;
+    _updateMethodHandler();
+  }
+  
+  static void setDisconnectCallbacks({
+    required VoidCallback onConfirmed,
+    required VoidCallback onCancelled,
+  }) {
+    _onDisconnectConfirmed = onConfirmed;
+    _onDisconnectCancelled = onCancelled;
+    _updateMethodHandler();
+  }
+  
+  // Single method handler that handles all callbacks
+  static void _updateMethodHandler() {
     _channel.setMethodCallHandler((call) async {
-      if (call.method == 'onPowerButtonTapped') callback();
+      switch (call.method) {
+        case 'onPowerButtonTapped':
+          _onPowerButtonTapped?.call();
+          break;
+        case 'onDisconnectConfirmed':
+          _onDisconnectConfirmed?.call();
+          break;
+        case 'onDisconnectCancelled':
+          _onDisconnectCancelled?.call();
+          break;
+      }
     });
   }
 }
@@ -134,39 +197,6 @@ class LiquidGlassHistoryButton {
         debugPrint('🕐 History button tapped callback');
         _onHistoryTapped?.call();
       }
-    });
-  }
-}
-
-/// Back button for navigating back from info screen  
-class LiquidGlassBackButton {
-  static const MethodChannel _channel = MethodChannel('liquid_glass_back_button');
-  
-  static Future<bool> isSupported() async => true;
-  
-  static Future<bool> show() async {
-    try {
-      final bool? result = await _channel.invokeMethod('enableNativeLiquidGlassBackButton');
-      return result ?? false;
-    } catch (e) {
-      debugPrint('Error showing liquid glass back button: $e');
-      return false;
-    }
-  }
-  
-  static Future<bool> hide() async {
-    try {
-      final bool? result = await _channel.invokeMethod('disableNativeLiquidGlassBackButton');
-      return result ?? false;
-    } catch (e) {
-      debugPrint('Error hiding liquid glass back button: $e');
-      return false;
-    }
-  }
-  
-  static void setOnBackButtonTappedCallback(VoidCallback callback) {
-    _channel.setMethodCallHandler((call) async {
-      if (call.method == 'onBackButtonTapped') callback();
     });
   }
 }
@@ -361,7 +391,8 @@ class SshService extends ChangeNotifier {
     }
 
     // Common development server ports to check (prioritized order)
-    final List<int> commonPorts = [3000, 8080, 5000, 5173, 4200, 8000, 3001, 5174];
+    // Removed 5000 - not commonly used for web development
+    final List<int> commonPorts = [3000, 8080, 5173, 4200, 8000, 3001, 5174];
     
     debugPrint('🔍 Checking for running servers on common ports...');
     
@@ -412,6 +443,23 @@ class SshService extends ChangeNotifier {
   // Disconnect from SSH server
   Future<void> disconnect() async {
     debugPrint('Disconnecting SSH session');
+    
+    try {
+      // Kill all tmux sessions before disconnecting
+      if (_client != null && isConnected) {
+        debugPrint('🧹 Cleaning up all tmux sessions...');
+        try {
+          final session = await _client!.execute('tmux kill-server 2>/dev/null || true');
+          await session.done;
+          debugPrint('✅ All tmux sessions killed');
+        } catch (e) {
+          debugPrint('⚠️ Error killing tmux sessions (may not exist): $e');
+        }
+      }
+    } catch (e) {
+      debugPrint('⚠️ Error during tmux cleanup: $e');
+    }
+    
     _stopKeepAlive();
     _stopConnectionCheck();
     _client?.close();
@@ -927,6 +975,9 @@ final connectedUsernameProvider = StateProvider<String?>((ref) => null);
 // Provider to track detected server port from terminal output
 final detectedServerPortProvider = StateProvider<int?>((ref) => null);
 
+// Provider to cache the last preview URL for instant toggle
+final cachedPreviewUrlProvider = StateProvider<String?>((ref) => null);
+
 final credentialsProvider = FutureProvider<Map<String, dynamic>?>((ref) async {
   final creds = await ref.read(credentialStorageServiceProvider).loadCredentials();
   if (creds != null) {
@@ -944,7 +995,7 @@ class SSHSession extends ConsumerStatefulWidget {
   ConsumerState<SSHSession> createState() => _SSHSessionState();
 }
 
-class _SSHSessionState extends ConsumerState<SSHSession> {
+class _SSHSessionState extends ConsumerState<SSHSession> with SingleTickerProviderStateMixin {
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _ipController;
   late final TextEditingController _portController;
@@ -953,7 +1004,8 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
   late final TextEditingController _privateKeyController;
   late final TextEditingController _privateKeyPassphraseController;
   bool? _liquidGlassSupported; // null until checked
-  bool _isDialogShowing = false;
+  late AnimationController _rotationController;
+  bool _isLoadingCredentials = false;
 
   @override
   void initState() {
@@ -965,6 +1017,12 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
     _passwordController = TextEditingController(text: credentials?['password'] ?? '');
     _privateKeyController = TextEditingController(text: credentials?['privateKey'] ?? '');
     _privateKeyPassphraseController = TextEditingController(text: '');
+    
+    // Initialize rotation animation controller
+    _rotationController = AnimationController(
+      duration: const Duration(milliseconds: 500),
+      vsync: this,
+    );
     
     // Initialize liquid glass buttons
     _initLiquidGlassButtons();
@@ -1013,20 +1071,29 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
   }
   
   Future<void> _initLiquidGlassHistoryButton() async {
-    // Set up callback for history button taps
-    LiquidGlassHistoryButton.setOnHistoryTappedCallback(() {
-      _loadRecentCredentials();
-    });
-    
-    // Show the history button
-    await LiquidGlassHistoryButton.show();
+    // History button is now embedded in the IP field as a clock icon
+    // Don't show the floating native button anymore
+    debugPrint('✅ History button embedded in IP field');
   }
   
   Future<void> _loadRecentCredentials() async {
-    debugPrint('🕐 Loading recent credentials');
+    if (_isLoadingCredentials) return; // Prevent multiple taps
+    
+    setState(() {
+      _isLoadingCredentials = true;
+    });
+    
+    // Start rotation animation
+    _rotationController.repeat();
+    
+    debugPrint('🔄 Loading recent credentials');
     
     // Load saved credentials
     final credentials = await ref.read(credentialStorageServiceProvider).loadCredentials();
+    
+    // Stop rotation animation
+    await _rotationController.forward(from: 0);
+    _rotationController.stop();
     
     if (credentials != null && mounted) {
       setState(() {
@@ -1036,42 +1103,25 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
         _passwordController.text = credentials['password'] ?? '';
         _privateKeyController.text = credentials['privateKey'] ?? '';
         _privateKeyPassphraseController.text = '';
+        _isLoadingCredentials = false;
       });
       
-      // Show a quick confirmation
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text(
-            'Recent credentials loaded',
-            style: TextStyle(color: Colors.white),
-          ),
-          backgroundColor: Colors.blue,
-          behavior: SnackBarBehavior.floating,
-          margin: EdgeInsets.only(
-            bottom: MediaQuery.of(context).size.height - 200,
-            left: 20,
-            right: 20,
-          ),
-          duration: const Duration(seconds: 2),
-        ),
+      // Show native iOS toast
+      await LiquidGlassToast.show(
+        message: 'Recent credentials loaded',
+        style: 'success',
+        duration: 1.5,
       );
     } else if (mounted) {
-      // No saved credentials
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text(
-            'No recent credentials found',
-            style: TextStyle(color: Colors.white),
-          ),
-          backgroundColor: Colors.orange,
-          behavior: SnackBarBehavior.floating,
-          margin: EdgeInsets.only(
-            bottom: MediaQuery.of(context).size.height - 200,
-            left: 20,
-            right: 20,
-          ),
-          duration: const Duration(seconds: 2),
-        ),
+      setState(() {
+        _isLoadingCredentials = false;
+      });
+      
+      // No saved credentials - show native iOS toast
+      await LiquidGlassToast.show(
+        message: 'No recent credentials found',
+        style: 'info',
+        duration: 1.5,
       );
     }
   }
@@ -1079,21 +1129,36 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
   void _handlePowerButtonTap() async {
     final currentSshService = ref.read(sshServiceProvider);
     if (currentSshService.isConnected) {
-      // Connected - Hide history button before navigating to Terminal screen
-      await LiquidGlassHistoryButton.hide();
-      
-      // Navigate to Terminal screen
+      // Navigate to Terminal screen (disable swipe-back to preserve power button flow)
       if (mounted) {
         await Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (context) => const TerminalScreen(),
+          PageRouteBuilder(
+            pageBuilder: (context, animation, secondaryAnimation) => const TerminalScreen(),
+            transitionsBuilder: (context, animation, secondaryAnimation, child) {
+              return SlideTransition(
+                position: Tween<Offset>(
+                  begin: const Offset(1.0, 0.0),
+                  end: Offset.zero,
+                ).animate(CurvedAnimation(
+                  parent: animation,
+                  curve: Curves.easeInOut,
+                )),
+                child: child,
+              );
+            },
           ),
         );
         
-        // When returning from Terminal, show history button again
-        if (mounted) {
-          await LiquidGlassHistoryButton.show();
-        }
+          // When returning from Terminal, restore SSH screen UI
+          if (mounted) {
+            // Re-register power button callback for SSH screen
+            _registerPowerButtonCallback();
+            
+            // Ensure play button is hidden (should be from Terminal cleanup, but double-check)
+            await LiquidGlassPlayButton.hide();
+            
+            debugPrint('✅ Returned to SSH screen, UI restored');
+          }
       }
     } else {
       // Not connected - attempt to connect
@@ -1109,6 +1174,7 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
     _passwordController.dispose();
     _privateKeyController.dispose();
     _privateKeyPassphraseController.dispose();
+    _rotationController.dispose();
     
     // Keep Power and Info buttons visible - they persist across SSH/Terminal screens
     // The Terminal screen will manage their state when navigating
@@ -1151,20 +1217,35 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
         await Future.delayed(const Duration(milliseconds: 800));
         await LiquidGlassPowerButton.updateState(isConnected: true);
         
-        // Hide history button before navigating to Terminal
-        await LiquidGlassHistoryButton.hide();
-        
-        // Auto-navigate to Terminal screen after successful connection
+        // Auto-navigate to Terminal screen after successful connection (disable swipe-back)
         if (mounted) {
           await Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (context) => const TerminalScreen(),
+            PageRouteBuilder(
+              pageBuilder: (context, animation, secondaryAnimation) => const TerminalScreen(),
+              transitionsBuilder: (context, animation, secondaryAnimation, child) {
+                return SlideTransition(
+                  position: Tween<Offset>(
+                    begin: const Offset(1.0, 0.0),
+                    end: Offset.zero,
+                  ).animate(CurvedAnimation(
+                    parent: animation,
+                    curve: Curves.easeInOut,
+                  )),
+                  child: child,
+                );
+              },
             ),
           );
           
-          // When returning from Terminal, show history button again
+          // When returning from Terminal, restore SSH screen UI
           if (mounted) {
-            await LiquidGlassHistoryButton.show();
+            // Re-register power button callback for SSH screen
+            _registerPowerButtonCallback();
+            
+            // Ensure play button is hidden (should be from Terminal cleanup, but double-check)
+            await LiquidGlassPlayButton.hide();
+            
+            debugPrint('✅ Returned to SSH screen, UI restored');
           }
         }
       } catch (e) {
@@ -1188,17 +1269,18 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
           errorMessage = 'Connection failed: ${e.toString()}';
         }
 
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(errorMessage, style: const TextStyle(color: Colors.white)),
-            backgroundColor: Colors.red.withAlpha(200),
-            behavior: SnackBarBehavior.floating,
-            duration: const Duration(seconds: 5),
-            margin: EdgeInsets.only(
-              bottom: MediaQuery.of(context).size.height - 200,
-              left: 20,
-              right: 20,
-            ),
+        // Show native iOS error alert
+        showCupertinoDialog(
+          context: context,
+          builder: (context) => CupertinoAlertDialog(
+            title: const Text('Connection Failed'),
+            content: Text(errorMessage),
+            actions: [
+              CupertinoDialogAction(
+                child: const Text('OK'),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ],
           ),
         );
       } finally {
@@ -1207,49 +1289,6 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
     }
   }
 
-  Future<void> _disconnect() async {
-    try {
-      await ref.read(sshServiceProvider.notifier).disconnect();
-      
-      // Clear connection state immediately
-      ref.read(connectedIpProvider.notifier).state = null;
-      ref.read(connectedUsernameProvider.notifier).state = null;
-      
-      // Update liquid glass power button state to disconnected
-      await LiquidGlassPowerButton.updateState(isConnected: false);
-      
-      // Force UI refresh by triggering a rebuild
-      if (mounted) {
-        setState(() {});
-      }
-      
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('Session ended', style: TextStyle(color: Colors.white)),
-          backgroundColor: Colors.black,
-          behavior: SnackBarBehavior.floating,
-          margin: EdgeInsets.only(
-            bottom: MediaQuery.of(context).size.height - 200,
-            left: 20,
-            right: 20,
-          ),
-        ),
-      );
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Failed to disconnect: $e', style: const TextStyle(color: Colors.white)),
-          backgroundColor: Colors.black,
-          behavior: SnackBarBehavior.floating,
-          margin: EdgeInsets.only(
-            bottom: MediaQuery.of(context).size.height - 200,
-            left: 20,
-            right: 20,
-          ),
-        ),
-      );
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -1309,84 +1348,23 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                     Row(
                       children: [
                         Expanded(
-                          flex: 6,
+                          flex: 7, // Increased from 6 to make IP field longer
                           child: TextFormField(
                             controller: _ipController,
                               decoration: InputDecoration(
                               labelText: 'Server IP',
                               labelStyle: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w700, fontSize: 16),
-                              suffixIcon: _liquidGlassSupported == false ? Consumer(
-                                builder: (context, ref, child) {
-                                  final currentSshService = ref.watch(sshServiceProvider);
-                                  final currentIsLoading = ref.watch(sshIsLoadingProvider);
-                                  
-                                  return currentIsLoading 
-                                    ? const Padding(
-                                        padding: EdgeInsets.all(12.0),
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          valueColor: AlwaysStoppedAnimation<Color>(Colors.white70),
-                                        ),
-                                      )
-                                    : Container(
-                                        width: 20,
-                                        height: 20,
-                                        decoration: const BoxDecoration(
-                                          shape: BoxShape.circle,
-                                          color: Colors.transparent,
-                                        ),
-                                        child: IconButton(
-                                          icon: Icon(
-                                            CupertinoIcons.power, 
-                                            size: 16, 
-                                            color: currentSshService.isConnected ? Colors.blue : Colors.white70,
-                                          ),
-                                          onPressed: () {
-                                          // Prevent multiple dialogs
-                                          if (_isDialogShowing) return;
-                                          
-                                          if (currentSshService.isConnected) {
-                                            _isDialogShowing = true;
-                                            showDialog(
-                                              context: context,
-                                              builder: (context) => AlertDialog(
-                                                backgroundColor: Colors.black,
-                                                title: const Text(
-                                                  'End session?',
-                                                  style: TextStyle(color: Colors.white, fontSize: 20),
-                                                  textAlign: TextAlign.center,
-                                                ),
-                                                actionsAlignment: MainAxisAlignment.center,
-                                                actions: [
-                                                  IconButton(
-                                                    onPressed: () {
-                                                      Navigator.pop(context);
-                                                      _isDialogShowing = false;
-                                                    },
-                                                    icon: const Icon(Icons.close, color: Colors.white),
-                                                  ),
-                                                  IconButton(
-                                                    onPressed: () {
-                                                      Navigator.pop(context);
-                                                      _isDialogShowing = false;
-                                                      _disconnect();
-                                                    },
-                                                    icon: const Icon(Icons.check, color: Colors.white),
-                                                  ),
-                                                ],
-                                              ),
-                                            ).then((_) {
-                                              // Ensure flag is reset even if dialog is dismissed other ways
-                                              _isDialogShowing = false;
-                                            });
-                                          } else {
-                                            _connect();
-                                          }
-                                        },
-                                      ),
-                                    );
-                                },
-                              ) : null,
+                              suffixIcon: IconButton(
+                                icon: RotationTransition(
+                                  turns: _rotationController,
+                                  child: const Icon(
+                                    CupertinoIcons.refresh,
+                                    size: 18,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                                onPressed: _loadRecentCredentials,
+                              ),
                               border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
                                 borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
@@ -1409,22 +1387,12 @@ class _SSHSessionState extends ConsumerState<SSHSession> {
                         ),
                         const SizedBox(width: 16),
                         Expanded(
-                          flex: 4,
+                          flex: 3, // Decreased from 4 to make port field smaller
                           child: TextFormField(
                             controller: _portController,
                             decoration: InputDecoration(
                               labelText: 'Port',
                               labelStyle: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w700, fontSize: 16),
-                              suffixIcon: _liquidGlassSupported == false ? IconButton(
-                                icon: const Icon(CupertinoIcons.info, size: 20, color: Colors.white70),
-                                onPressed: () async {
-                                  await Navigator.of(context).push(
-                                    MaterialPageRoute(
-                                      builder: (context) => const InfoScreenFullPage(),
-                                    ),
-                                  );
-                                },
-                              ) : null,
                               border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
                                 borderSide: BorderSide(color: Colors.white.withAlpha((255 * 0.3).round())),
@@ -1639,75 +1607,6 @@ class NoGlowScrollBehavior extends ScrollBehavior {
       axisDirection: details.direction,
       color: Colors.black,
       child: child,
-    );
-  }
-}
-
-class InfoScreenFullPage extends StatefulWidget {
-  const InfoScreenFullPage({super.key});
-
-  @override
-  State<InfoScreenFullPage> createState() => _InfoScreenFullPageState();
-}
-
-class _InfoScreenFullPageState extends State<InfoScreenFullPage> {
-  bool? _liquidGlassSupported; // null until checked
-  bool _liquidGlassBackButtonShown = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _initLiquidGlassBackButton();
-  }
-
-  Future<void> _initLiquidGlassBackButton() async {
-    final supported = await LiquidGlassBackButton.isSupported();
-    setState(() {
-      _liquidGlassSupported = supported;
-    });
-    
-    if (supported) {
-      // Set up callback for back button taps
-      LiquidGlassBackButton.setOnBackButtonTappedCallback(() {
-        if (mounted) {
-          Navigator.of(context).pop();
-        }
-      });
-
-      // Show the back button
-      final shown = await LiquidGlassBackButton.show();
-
-      if (shown && mounted) {
-        setState(() {
-          _liquidGlassBackButtonShown = true;
-        });
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    // Hide liquid glass back button when leaving info screen
-    if (_liquidGlassBackButtonShown) {
-      LiquidGlassBackButton.hide();
-    }
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF0a0a0a),
-      appBar: AppBar(
-        backgroundColor: const Color(0xFF0a0a0a),
-        elevation: 0,
-        leading: _liquidGlassSupported == false ? IconButton(
-          icon: const Icon(Icons.chevron_left, color: Colors.white, size: 32),
-          onPressed: () => Navigator.of(context).pop(),
-        ) : null,
-        automaticallyImplyLeading: _liquidGlassSupported == false,
-      ),
-      body: const InfoScreen(),
     );
   }
 }

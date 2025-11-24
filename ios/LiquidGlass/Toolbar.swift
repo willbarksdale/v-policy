@@ -3,10 +3,14 @@ import Flutter
 import SwiftUI
 
 // ============================================================================
-// TOOLBAR COMPONENTS - iOS 26+ Liquid Glass
+// LIQUID GLASS UI COMPONENTS - iOS 26+
 // ============================================================================
-// Contains all floating toolbar buttons: Power, Info, Back, Play
-// Plus the shared GlassEffectContainer utility
+// Complete Liquid Glass component library for the app:
+//   1. Shared: GlassEffectContainer utility
+//   2. Buttons: Power, Info, Back, Play, History
+//   3. Inputs: Terminal Input Bar, URL Bar
+//   4. Tabs: Terminal Tabs
+//   5. Notifications: Toast
 // ============================================================================
 
 // ============================================================================
@@ -26,7 +30,7 @@ struct GlassEffectContainer<Content: View>: View {
 }
 
 // ============================================================================
-// MARK: - Power Button (SSH Screen - Bottom Right)
+// MARK: - Power Button (Top Right - SSH & Terminal Screens)
 // ============================================================================
 
 class PowerButtonState: ObservableObject {
@@ -62,8 +66,6 @@ struct AuthenticLiquidGlassPowerButton: View {
 class SimpleLiquidGlassPowerButtonPlugin: NSObject, FlutterPlugin {
     private var buttonState: PowerButtonState?
     private var hostingController: UIHostingController<AnyView>?
-    private var bottomConstraint: NSLayoutConstraint?
-    private var keyboardObservers: [NSObjectProtocol] = []
     
     static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(name: "liquid_glass_power_button", binaryMessenger: registrar.messenger())
@@ -71,9 +73,6 @@ class SimpleLiquidGlassPowerButtonPlugin: NSObject, FlutterPlugin {
         registrar.addMethodCallDelegate(instance, channel: channel)
     }
     
-    deinit {
-        keyboardObservers.forEach { NotificationCenter.default.removeObserver($0) }
-    }
     
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
@@ -91,6 +90,8 @@ class SimpleLiquidGlassPowerButtonPlugin: NSObject, FlutterPlugin {
             updatePowerButtonState(isConnected: isConnected, result: result)
         case "showSuccessAnimation":
             showSuccessAnimation(result: result)
+        case "showDisconnectAlert":
+            showDisconnectAlert(result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -137,11 +138,9 @@ class SimpleLiquidGlassPowerButtonPlugin: NSObject, FlutterPlugin {
             flutterViewController.addChild(hostingController)
             flutterViewController.view.addSubview(hostingController.view)
             
-            let bottomConstraint = hostingController.view.bottomAnchor.constraint(equalTo: flutterViewController.view.safeAreaLayoutGuide.bottomAnchor, constant: -8)
-            self.bottomConstraint = bottomConstraint
-            
+            // Position: Top Right (16pt from right, 8pt from top safe area)
             NSLayoutConstraint.activate([
-                bottomConstraint,
+                hostingController.view.topAnchor.constraint(equalTo: flutterViewController.view.safeAreaLayoutGuide.topAnchor, constant: 8),
                 hostingController.view.trailingAnchor.constraint(equalTo: flutterViewController.view.trailingAnchor, constant: -16),
                 hostingController.view.widthAnchor.constraint(greaterThanOrEqualToConstant: 44),
                 hostingController.view.heightAnchor.constraint(greaterThanOrEqualToConstant: 44)
@@ -149,9 +148,6 @@ class SimpleLiquidGlassPowerButtonPlugin: NSObject, FlutterPlugin {
             
             hostingController.didMove(toParent: flutterViewController)
             self.hostingController = hostingController
-            
-            // Listen for keyboard notifications to move button with keyboard
-            self.setupKeyboardObservers(flutterViewController: flutterViewController)
 
             result(true)
         }
@@ -190,6 +186,36 @@ class SimpleLiquidGlassPowerButtonPlugin: NSObject, FlutterPlugin {
         }
     }
     
+    private func showDisconnectAlert(result: @escaping FlutterResult) {
+        DispatchQueue.main.async {
+            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                  let window = windowScene.windows.first,
+                  let rootViewController = window.rootViewController as? FlutterViewController else {
+                result(false)
+                return
+            }
+            
+            let alert = UIAlertController(
+                title: "End session?",
+                message: "This will disconnect your SSH session.",
+                preferredStyle: .alert
+            )
+            
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
+                let channel = FlutterMethodChannel(name: "liquid_glass_power_button", binaryMessenger: rootViewController.binaryMessenger)
+                channel.invokeMethod("onDisconnectCancelled", arguments: nil)
+            })
+            
+            alert.addAction(UIAlertAction(title: "End Session", style: .destructive) { _ in
+                let channel = FlutterMethodChannel(name: "liquid_glass_power_button", binaryMessenger: rootViewController.binaryMessenger)
+                channel.invokeMethod("onDisconnectConfirmed", arguments: nil)
+            })
+            
+            rootViewController.present(alert, animated: true)
+            result(true)
+        }
+    }
+    
     private func disableLiquidGlassForCurrentScreen(result: @escaping FlutterResult) {
         DispatchQueue.main.async {
             if let hostingController = self.hostingController {
@@ -200,55 +226,10 @@ class SimpleLiquidGlassPowerButtonPlugin: NSObject, FlutterPlugin {
             }
         }
     }
-    
-    private func setupKeyboardObservers(flutterViewController: FlutterViewController) {
-        // Keyboard will show - move button up with keyboard
-        let showObserver = NotificationCenter.default.addObserver(
-            forName: UIResponder.keyboardWillShowNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self, weak flutterViewController] notification in
-            guard let self = self,
-                  let flutterViewController = flutterViewController,
-                  let keyboardFrame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect,
-                  let constraint = self.bottomConstraint else { return }
-            
-            let keyboardHeight = keyboardFrame.height
-            let safeAreaBottom = flutterViewController.view.safeAreaInsets.bottom
-            
-            // Move button to match terminal input position (above keyboard)
-            constraint.constant = -(keyboardHeight - safeAreaBottom + 8)
-            
-            UIView.animate(withDuration: 0.3, delay: 0, options: .curveEaseOut) {
-                flutterViewController.view.layoutIfNeeded()
-            }
-        }
-        
-        // Keyboard will hide - move button back to original position
-        let hideObserver = NotificationCenter.default.addObserver(
-            forName: UIResponder.keyboardWillHideNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self, weak flutterViewController] _ in
-            guard let self = self,
-                  let flutterViewController = flutterViewController,
-                  let constraint = self.bottomConstraint else { return }
-            
-            // Move back to original position
-            constraint.constant = -8
-            
-            UIView.animate(withDuration: 0.3, delay: 0, options: .curveEaseOut) {
-                flutterViewController.view.layoutIfNeeded()
-            }
-        }
-        
-        keyboardObservers.append(showObserver)
-        keyboardObservers.append(hideObserver)
-    }
 }
 
 // ============================================================================
-// MARK: - Info Button (SSH Screen - Bottom Left)
+// MARK: - Info Button (Top Left - SSH Screen)
 // ============================================================================
 
 struct InfoSheetView: View {
@@ -581,6 +562,8 @@ struct AuthenticLiquidGlassPlayButton: View {
 class SimpleLiquidGlassPlayButtonPlugin: NSObject, FlutterPlugin {
     private var buttonState: PlayButtonState?
     private var hostingController: UIHostingController<AnyView>?
+    private var bottomConstraint: NSLayoutConstraint?
+    private var keyboardObservers: [Any] = []
     
     static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(name: "liquid_glass_play_button", binaryMessenger: registrar.messenger())
@@ -641,12 +624,58 @@ class SimpleLiquidGlassPlayButtonPlugin: NSObject, FlutterPlugin {
             
             flutterViewController.addChild(hostingController)
             flutterViewController.view.addSubview(hostingController.view)
+            
+            // Position: Bottom Right (16pt from right, 8pt from bottom safe area)
+            let constraint = hostingController.view.bottomAnchor.constraint(equalTo: flutterViewController.view.safeAreaLayoutGuide.bottomAnchor, constant: -8)
+            self.bottomConstraint = constraint
+            
             NSLayoutConstraint.activate([
-                hostingController.view.topAnchor.constraint(equalTo: flutterViewController.view.safeAreaLayoutGuide.topAnchor, constant: 10),
+                constraint,
                 hostingController.view.trailingAnchor.constraint(equalTo: flutterViewController.view.trailingAnchor, constant: -16),
                 hostingController.view.widthAnchor.constraint(greaterThanOrEqualToConstant: 44),
                 hostingController.view.heightAnchor.constraint(greaterThanOrEqualToConstant: 44)
             ])
+            
+            // Add keyboard observers to move button up with keyboard
+            let showObserver = NotificationCenter.default.addObserver(
+                forName: UIResponder.keyboardWillShowNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self, weak flutterViewController] notification in
+                guard let self = self,
+                      let flutterViewController = flutterViewController,
+                      let keyboardFrame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect,
+                      let constraint = self.bottomConstraint else { return }
+                
+                let keyboardHeight = keyboardFrame.height
+                let safeAreaBottom = flutterViewController.view.safeAreaInsets.bottom
+                
+                // Move button to align with terminal input (keyboard height - safe area + 8pt padding)
+                constraint.constant = -(keyboardHeight - safeAreaBottom + 8)
+                
+                UIView.animate(withDuration: 0.3, delay: 0, options: .curveEaseOut) {
+                    flutterViewController.view.layoutIfNeeded()
+                }
+            }
+            
+            let hideObserver = NotificationCenter.default.addObserver(
+                forName: UIResponder.keyboardWillHideNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self, weak flutterViewController] _ in
+                guard let self = self,
+                      let flutterViewController = flutterViewController,
+                      let constraint = self.bottomConstraint else { return }
+                
+                // Move back to original position
+                constraint.constant = -8
+                
+                UIView.animate(withDuration: 0.3, delay: 0, options: .curveEaseOut) {
+                    flutterViewController.view.layoutIfNeeded()
+                }
+            }
+            
+            self.keyboardObservers = [showObserver, hideObserver]
             
             hostingController.didMove(toParent: flutterViewController)
             self.hostingController = hostingController
@@ -675,6 +704,12 @@ class SimpleLiquidGlassPlayButtonPlugin: NSObject, FlutterPlugin {
                 return
             }
             
+            // Remove keyboard observers
+            for observer in self.keyboardObservers {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            self.keyboardObservers.removeAll()
+            
             flutterViewController.view.subviews.filter { $0.tag == 9995 }.forEach { $0.removeFromSuperview() }
             flutterViewController.children.forEach { child in
                 if child.view?.tag == 9995 {
@@ -682,14 +717,16 @@ class SimpleLiquidGlassPlayButtonPlugin: NSObject, FlutterPlugin {
                 }
             }
             self.hostingController = nil
+            self.bottomConstraint = nil
             result(true)
         }
     }
 }
 
 // ============================================================================
-// MARK: - History Button (SSH Screen - Top Left)
+// MARK: - History Button (Bottom Right - SSH Screen)
 // ============================================================================
+// Recent credentials button - loads last used SSH credentials
 
 struct AuthenticLiquidGlassHistoryButton: View {
     let onHistoryTapped: () -> Void
@@ -766,10 +803,10 @@ class SimpleLiquidGlassHistoryButtonPlugin: NSObject, FlutterPlugin {
             flutterViewController.addChild(hosting)
             flutterViewController.view.addSubview(hosting.view)
             
-            // Position: Top Right (16pt from right, 8pt from top safe area)
+            // Position: Bottom Right (16pt from right, 8pt from bottom safe area)
             NSLayoutConstraint.activate([
                 hosting.view.trailingAnchor.constraint(equalTo: flutterViewController.view.trailingAnchor, constant: -16),
-                hosting.view.topAnchor.constraint(equalTo: flutterViewController.view.safeAreaLayoutGuide.topAnchor, constant: 8),
+                hosting.view.bottomAnchor.constraint(equalTo: flutterViewController.view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
                 hosting.view.widthAnchor.constraint(equalToConstant: 44),
                 hosting.view.heightAnchor.constraint(equalToConstant: 44)
             ])
@@ -809,8 +846,9 @@ class SimpleLiquidGlassHistoryButtonPlugin: NSObject, FlutterPlugin {
 }
 
 // ============================================================================
-// MARK: - URL Bar (Preview Screen)
+// MARK: - URL Bar (Bottom - Preview Screen)
 // ============================================================================
+// Safari-style URL bar with navigation buttons and terminal button
 
 struct LiquidGlassURLBar: View {
     let url: String
@@ -819,10 +857,12 @@ struct LiquidGlassURLBar: View {
     let onBackTapped: () -> Void
     let onForwardTapped: () -> Void
     let onCloseTapped: () -> Void
+    let onRefreshTapped: () -> Void
     let onURLSubmitted: (String) -> Void
     
     @State private var isEditingURL: Bool = false
     @State private var editingURL: String
+    @FocusState private var isTextFieldFocused: Bool
     @Namespace private var namespace
     
     init(
@@ -832,6 +872,7 @@ struct LiquidGlassURLBar: View {
         onBackTapped: @escaping () -> Void,
         onForwardTapped: @escaping () -> Void,
         onCloseTapped: @escaping () -> Void,
+        onRefreshTapped: @escaping () -> Void,
         onURLSubmitted: @escaping (String) -> Void
     ) {
         self.url = url
@@ -840,6 +881,7 @@ struct LiquidGlassURLBar: View {
         self.onBackTapped = onBackTapped
         self.onForwardTapped = onForwardTapped
         self.onCloseTapped = onCloseTapped
+        self.onRefreshTapped = onRefreshTapped
         self.onURLSubmitted = onURLSubmitted
         self._editingURL = State(initialValue: url)
     }
@@ -854,19 +896,25 @@ struct LiquidGlassURLBar: View {
                         TextField("Search or enter website name", text: $editingURL, onCommit: {
                             onURLSubmitted(editingURL)
                             isEditingURL = false
+                            isTextFieldFocused = false
                         })
                         .font(.system(size: 17))
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .foregroundStyle(.primary)
+                        .focused($isTextFieldFocused)
                     }
                     .padding(.horizontal, 12)
                     .frame(height: 44)
                     .glassEffect(.regular.interactive())
                     .glassEffectID("urlFieldEditing", in: namespace)
                     
-                    // X button to close preview
-                    Button(action: onCloseTapped) {
+                    // X button to dismiss keyboard (cancel editing)
+                    Button(action: {
+                        isEditingURL = false
+                        isTextFieldFocused = false
+                        editingURL = url // Reset to original URL
+                    }) {
                         Image(systemName: "xmark")
                             .font(.system(size: 17, weight: .semibold))
                             .foregroundStyle(.primary)
@@ -877,6 +925,12 @@ struct LiquidGlassURLBar: View {
                     .glassEffectID("closeButton", in: namespace)
                 }
                 .padding(.horizontal, 16)
+                .onAppear {
+                    // Auto-focus when entering edit mode (Safari behavior)
+                    if isEditingURL {
+                        isTextFieldFocused = true
+                    }
+                }
             } else {
                 // Display mode: Navigation buttons + URL + Terminal button
                 // Combined back/forward button (Safari-style pill)
@@ -925,10 +979,6 @@ struct LiquidGlassURLBar: View {
                             .truncationMode(.middle)
                         
                         Spacer(minLength: 4)
-                        
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.secondary)
                     }
                     .padding(.horizontal, 12)
                     .frame(height: 40)
@@ -936,6 +986,17 @@ struct LiquidGlassURLBar: View {
                 .buttonStyle(.plain)
                 .glassEffect(.regular.interactive())
                 .glassEffectID("urlBarDisplay", in: namespace)
+                
+                // Refresh button (separate from URL bar)
+                Button(action: onRefreshTapped) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 40, height: 40)
+                }
+                .buttonStyle(.plain)
+                .glassEffect(.regular.interactive())
+                .glassEffectID("refreshButton", in: namespace)
                 
                 // Back to Terminal button
                 Button(action: onCloseTapped) {
@@ -953,6 +1014,15 @@ struct LiquidGlassURLBar: View {
         .padding(.vertical, 8)
         .onChange(of: url) { _, newURL in
             editingURL = newURL
+        }
+        .onChange(of: isEditingURL) { _, isEditing in
+            // Auto-focus when entering edit mode (Safari behavior)
+            if isEditing {
+                // Delay slightly to ensure UI transition completes
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    isTextFieldFocused = true
+                }
+            }
         }
     }
     
@@ -974,6 +1044,11 @@ struct LiquidGlassURLBar: View {
 class SimpleLiquidGlassURLBarPlugin: NSObject, FlutterPlugin {
     private var hostingController: UIHostingController<LiquidGlassURLBar>?
     private var methodChannel: FlutterMethodChannel?
+    private var bottomConstraint: NSLayoutConstraint?
+    private var keyboardObservers: [Any] = []
+    private var currentURL: String = ""
+    private var currentCanGoBack: Bool = false
+    private var currentCanGoForward: Bool = false
     
     static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(name: "liquid_glass_url_bar", binaryMessenger: registrar.messenger())
@@ -1013,6 +1088,11 @@ class SimpleLiquidGlassURLBarPlugin: NSObject, FlutterPlugin {
                 return
             }
             
+            // Store current state
+            self.currentURL = url
+            self.currentCanGoBack = canGoBack
+            self.currentCanGoForward = canGoForward
+            
             // Remove existing if any
             window.subviews.filter { $0.tag == 9990 }.forEach { $0.removeFromSuperview() }
             
@@ -1029,6 +1109,9 @@ class SimpleLiquidGlassURLBarPlugin: NSObject, FlutterPlugin {
                 onCloseTapped: { [weak self] in
                     self?.methodChannel?.invokeMethod("onCloseTapped", arguments: nil)
                 },
+                onRefreshTapped: { [weak self] in
+                    self?.methodChannel?.invokeMethod("onRefreshTapped", arguments: nil)
+                },
                 onURLSubmitted: { [weak self] newURL in
                     self?.methodChannel?.invokeMethod("onURLSubmitted", arguments: ["url": newURL])
                 }
@@ -1041,13 +1124,848 @@ class SimpleLiquidGlassURLBarPlugin: NSObject, FlutterPlugin {
             
             window.addSubview(hosting.view)
             
-            // Position at bottom with safe area
+            // Position at bottom with safe area (very close to bottom for sleeker look)
             let safeAreaBottom = window.safeAreaInsets.bottom
+            let constraint = hosting.view.bottomAnchor.constraint(equalTo: window.bottomAnchor, constant: -(safeAreaBottom + 0))
+            self.bottomConstraint = constraint
+            
             NSLayoutConstraint.activate([
                 hosting.view.leadingAnchor.constraint(equalTo: window.leadingAnchor),
                 hosting.view.trailingAnchor.constraint(equalTo: window.trailingAnchor),
-                hosting.view.bottomAnchor.constraint(equalTo: window.bottomAnchor, constant: -(safeAreaBottom + 8)),
+                constraint,
                 hosting.view.heightAnchor.constraint(equalToConstant: 56)
+            ])
+            
+            // Observe keyboard to move URL bar above it
+            let showObserver = NotificationCenter.default.addObserver(
+                forName: UIResponder.keyboardWillShowNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self, weak window] notification in
+                guard let self = self,
+                      let window = window,
+                      let keyboardFrame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect,
+                      let constraint = self.bottomConstraint else { return }
+                
+                let keyboardHeight = keyboardFrame.height
+                
+                // Move URL bar above keyboard
+                constraint.constant = -keyboardHeight - 8
+                
+                UIView.animate(withDuration: 0.3, delay: 0, options: .curveEaseOut) {
+                    window.layoutIfNeeded()
+                }
+            }
+            
+            let hideObserver = NotificationCenter.default.addObserver(
+                forName: UIResponder.keyboardWillHideNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self, weak window] _ in
+                guard let self = self,
+                      let window = window,
+                      let constraint = self.bottomConstraint else { return }
+                
+                // Move URL bar back to bottom
+                let safeAreaBottom = window.safeAreaInsets.bottom
+                constraint.constant = -(safeAreaBottom + 0)
+                
+                UIView.animate(withDuration: 0.3, delay: 0, options: .curveEaseOut) {
+                    window.layoutIfNeeded()
+                }
+            }
+            
+            self.keyboardObservers = [showObserver, hideObserver]
+            self.hostingController = hosting
+            result(true)
+        }
+    }
+    
+    private func hide(result: @escaping FlutterResult) {
+        DispatchQueue.main.async {
+            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                  let window = windowScene.windows.first else {
+                result(false)
+                return
+            }
+            
+            // Remove keyboard observers
+            for observer in self.keyboardObservers {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            self.keyboardObservers.removeAll()
+            
+            window.subviews.filter { $0.tag == 9990 }.forEach { $0.removeFromSuperview() }
+            self.hostingController = nil
+            self.bottomConstraint = nil
+            result(true)
+        }
+    }
+    
+    private func updateState(url: String?, canGoBack: Bool?, canGoForward: Bool?, result: @escaping FlutterResult) {
+        // Use provided values or keep current state
+        let updatedURL = url ?? self.currentURL
+        let updatedCanGoBack = canGoBack ?? self.currentCanGoBack
+        let updatedCanGoForward = canGoForward ?? self.currentCanGoForward
+        
+        // Recreate the view with updated state
+        show(url: updatedURL, canGoBack: updatedCanGoBack, canGoForward: updatedCanGoForward, result: result)
+    }
+}
+
+// ============================================================================
+// MARK: - Toast Notifications (Bottom Center)
+// ============================================================================
+// System-wide toast messages for success, error, and info
+
+@available(iOS 26.0, *)
+struct LiquidGlassToast: View {
+    let message: String
+    let style: ToastStyle
+    @Namespace private var namespace
+    
+    enum ToastStyle {
+        case success
+        case error
+        case info
+        
+        var backgroundColor: Color {
+            switch self {
+            case .success: return .blue.opacity(0.9)  // System blue for success
+            case .error: return .red.opacity(0.9)
+            case .info: return .blue.opacity(0.9)
+            }
+        }
+        
+        var icon: String {
+            switch self {
+            case .success: return "checkmark.circle.fill"
+            case .error: return "exclamationmark.circle.fill"
+            case .info: return "info.circle.fill"
+            }
+        }
+    }
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: style.icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white)
+            
+            Text(message)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .background(style.backgroundColor)
+        .cornerRadius(24)
+        .shadow(color: .black.opacity(0.3), radius: 10, x: 0, y: 5)
+    }
+}
+
+@available(iOS 26.0, *)
+class LiquidGlassToastPlugin: NSObject, FlutterPlugin {
+    private var hostingController: UIHostingController<AnyView>?
+    
+    static func register(with registrar: FlutterPluginRegistrar) {
+        let channel = FlutterMethodChannel(name: "liquid_glass_toast", binaryMessenger: registrar.messenger())
+        let instance = LiquidGlassToastPlugin()
+        registrar.addMethodCallDelegate(instance, channel: channel)
+    }
+    
+    func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        switch call.method {
+        case "show":
+            let args = call.arguments as? [String: Any]
+            let message = args?["message"] as? String ?? ""
+            let styleString = args?["style"] as? String ?? "info"
+            let duration = args?["duration"] as? Double ?? 2.0
+            
+            let style: LiquidGlassToast.ToastStyle
+            switch styleString {
+            case "success": style = .success
+            case "error": style = .error
+            default: style = .info
+            }
+            
+            show(message: message, style: style, duration: duration, result: result)
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+    
+    private func show(message: String, style: LiquidGlassToast.ToastStyle, duration: Double, result: @escaping FlutterResult) {
+        DispatchQueue.main.async {
+            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                  let window = windowScene.windows.first else {
+                result(false)
+                return
+            }
+            
+            // Remove existing toast if any
+            window.subviews.filter { $0.tag == 9989 }.forEach { $0.removeFromSuperview() }
+            
+            let toast = LiquidGlassToast(message: message, style: style)
+            let hosting = UIHostingController(rootView: AnyView(toast))
+            hosting.view.backgroundColor = .clear
+            hosting.view.tag = 9989
+            hosting.view.translatesAutoresizingMaskIntoConstraints = false
+            
+            window.addSubview(hosting.view)
+            
+            let safeAreaBottom = window.safeAreaInsets.bottom
+            NSLayoutConstraint.activate([
+                hosting.view.centerXAnchor.constraint(equalTo: window.centerXAnchor),
+                hosting.view.bottomAnchor.constraint(equalTo: window.bottomAnchor, constant: -(safeAreaBottom + 20)),
+                hosting.view.leadingAnchor.constraint(greaterThanOrEqualTo: window.leadingAnchor, constant: 20),
+                hosting.view.trailingAnchor.constraint(lessThanOrEqualTo: window.trailingAnchor, constant: -20)
+            ])
+            
+            self.hostingController = hosting
+            
+            // Animate in
+            hosting.view.alpha = 0
+            hosting.view.transform = CGAffineTransform(translationX: 0, y: 20)
+            UIView.animate(withDuration: 0.3, delay: 0, options: .curveEaseOut) {
+                hosting.view.alpha = 1
+                hosting.view.transform = .identity
+            }
+            
+            // Auto-dismiss after duration
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
+                UIView.animate(withDuration: 0.3, delay: 0, options: .curveEaseIn, animations: {
+                    hosting.view.alpha = 0
+                    hosting.view.transform = CGAffineTransform(translationX: 0, y: 20)
+                }) { _ in
+                    hosting.view.removeFromSuperview()
+                    self.hostingController = nil
+                }
+            }
+            
+            result(true)
+        }
+    }
+}
+
+// ============================================================================
+// MARK: - Terminal Input Bar (Bottom - Terminal Screen)
+// ============================================================================
+// Native command input with keyboard handling, send button, and animations
+
+@available(iOS 16.0, *)
+class LiquidGlassTerminalInputPlugin: NSObject, FlutterPlugin {
+    private var hostingController: Any? // Use Any to avoid iOS 26 requirement on class level
+    private var terminalInputView: Any? // Use Any to avoid iOS 26 requirement
+    private var bottomConstraint: NSLayoutConstraint? // Keep track of keyboard constraint
+    private var keyboardObservers: [Any] = [] // Track observers for cleanup
+    static var shared: LiquidGlassTerminalInputPlugin?
+    private var methodChannel: FlutterMethodChannel?
+    
+    // State tracking to prevent duplicate creation
+    private var isTerminalInputVisible = false
+
+    static func register(with registrar: FlutterPluginRegistrar) {
+        let channel = FlutterMethodChannel(name: "liquid_glass_terminal_input", binaryMessenger: registrar.messenger())
+        let instance = LiquidGlassTerminalInputPlugin()
+        instance.methodChannel = channel
+        LiquidGlassTerminalInputPlugin.shared = instance
+        registrar.addMethodCallDelegate(instance, channel: channel)
+    }
+
+    func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        switch call.method {
+        case "isLiquidGlassSupported":
+            if #available(iOS 26.0, *) {
+                result(true)
+            } else {
+                result(false)
+            }
+        case "showTerminalInput":
+            if #available(iOS 26.0, *) {
+                showTerminalInput(call: call, result: result)
+            } else {
+                result(false)
+            }
+        case "hideTerminalInput":
+            hideTerminalInput(result: result)
+        case "clearTerminalInput":
+            if #available(iOS 26.0, *) {
+                clearTerminalInput(result: result)
+            } else {
+                result(false)
+            }
+        case "setTerminalInputText":
+            if #available(iOS 26.0, *) {
+                setTerminalInputText(call: call, result: result)
+            } else {
+                result(false)
+            }
+        case "dismissKeyboard":
+            dismissKeyboard(result: result)
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+
+    @available(iOS 26.0, *)
+    private func showTerminalInput(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        // Check if already visible
+        if isTerminalInputVisible {
+            print("ℹ️ Terminal input already visible, skipping creation")
+            result(true)
+            return
+        }
+        
+        guard let window = UIApplication.shared.windows.first,
+              let flutterViewController = window.rootViewController as? FlutterViewController else {
+            result(false)
+            return
+        }
+
+        let args = call.arguments as? [String: Any]
+        let placeholder = args?["placeholder"] as? String ?? "Type command..."
+
+        // Create terminal input view model
+        let viewModel = TerminalInputViewModel(
+            placeholder: placeholder,
+            onSendCommand: { [weak self] text in
+                self?.methodChannel?.invokeMethod("onCommandSent", arguments: ["text": text])
+            },
+            onInputChanged: { [weak self] text in
+                self?.methodChannel?.invokeMethod("onInputChanged", arguments: ["text": text])
+            },
+            onDismissKeyboard: { [weak self] in
+                self?.methodChannel?.invokeMethod("onDismissKeyboard", arguments: nil)
+            },
+            onControlKey: { [weak self] key in
+                self?.methodChannel?.invokeMethod("onControlKey", arguments: ["key": key])
+            }
+        )
+        
+        let inputView = TerminalInputView(viewModel: viewModel)
+        terminalInputView = inputView
+
+        // Create hosting controller
+        let hosting = UIHostingController(rootView: inputView)
+        hosting.view.backgroundColor = .clear
+        hosting.view.isUserInteractionEnabled = true
+        self.hostingController = hosting
+
+        // Add to window directly (not as subview of Flutter view controller)
+        window.addSubview(hosting.view)
+        hosting.view.translatesAutoresizingMaskIntoConstraints = false
+        
+        // Position at same height as Info/Power buttons (between them)
+        let safeAreaBottom = window.safeAreaInsets.bottom
+        let bottomOffset = 8 + safeAreaBottom // Same as toolbar buttons (-8 from safe area = 8 + safeAreaBottom from window bottom)
+        let inputHeight: CGFloat = 44 // Match button height for visual consistency
+        
+        let constraint = hosting.view.bottomAnchor.constraint(equalTo: window.bottomAnchor, constant: -bottomOffset)
+        self.bottomConstraint = constraint
+        
+        NSLayoutConstraint.activate([
+            hosting.view.leadingAnchor.constraint(equalTo: window.leadingAnchor, constant: 20), // Standard left padding
+            hosting.view.trailingAnchor.constraint(equalTo: window.trailingAnchor, constant: -76), // 16px gap + 44px power button + 16px padding
+            constraint,
+            hosting.view.heightAnchor.constraint(equalToConstant: inputHeight)
+        ])
+        
+        // Listen for keyboard notifications to move input above keyboard
+        let showObserver = NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillShowNotification, object: nil, queue: .main) { [weak self, weak window] notification in
+            guard let self = self,
+                  let window = window,
+                  let keyboardFrame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect,
+                  let constraint = self.bottomConstraint else { return }
+            
+            let keyboardHeight = keyboardFrame.height
+            
+            // Notify Flutter that keyboard is showing
+            self.methodChannel?.invokeMethod("onKeyboardShow", arguments: ["height": keyboardHeight])
+            
+            // Animate input above keyboard
+            constraint.constant = -keyboardHeight - 8
+            
+            UIView.animate(withDuration: 0.3, delay: 0, options: .curveEaseOut) {
+                window.layoutIfNeeded()
+            }
+        }
+        
+        let hideObserver = NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillHideNotification, object: nil, queue: .main) { [weak self, weak window] _ in
+            guard let self = self,
+                  let window = window,
+                  let constraint = self.bottomConstraint else { return }
+            
+            // Notify Flutter that keyboard is hiding
+            self.methodChannel?.invokeMethod("onKeyboardHide", arguments: nil)
+            
+            // Animate back to original position
+            constraint.constant = -bottomOffset
+            
+            UIView.animate(withDuration: 0.3, delay: 0, options: .curveEaseOut) {
+                window.layoutIfNeeded()
+            }
+        }
+        
+        keyboardObservers = [showObserver, hideObserver]
+        
+        // Bring to front to ensure it's above Flutter content
+        window.bringSubviewToFront(hosting.view)
+        
+        isTerminalInputVisible = true
+        print("✅ Liquid Glass terminal input created with keyboard observer")
+        result(true)
+    }
+    
+    private func hideTerminalInput(result: @escaping FlutterResult) {
+        if #available(iOS 26.0, *) {
+            if let hosting = hostingController as? UIHostingController<TerminalInputView> {
+                // Remove keyboard observers properly
+                for observer in keyboardObservers {
+                    NotificationCenter.default.removeObserver(observer)
+                }
+                keyboardObservers.removeAll()
+                
+                hosting.view.removeFromSuperview()
+                hostingController = nil
+                terminalInputView = nil
+                bottomConstraint = nil
+                isTerminalInputVisible = false
+                print("✅ Liquid Glass terminal input hidden and cleaned up")
+            }
+        }
+        result(true)
+    }
+
+    @available(iOS 26.0, *)
+    private func clearTerminalInput(result: @escaping FlutterResult) {
+        if let inputView = terminalInputView as? TerminalInputView {
+            inputView.viewModel.clearInput()
+        }
+        result(true)
+    }
+
+    @available(iOS 26.0, *)
+    private func setTerminalInputText(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        let args = call.arguments as? [String: Any]
+        let text = args?["text"] as? String ?? ""
+        
+        if let inputView = terminalInputView as? TerminalInputView {
+            inputView.viewModel.setText(text)
+        }
+        result(true)
+    }
+    
+    private func dismissKeyboard(result: @escaping FlutterResult) {
+        DispatchQueue.main.async {
+            // Resign first responder to dismiss keyboard
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            print("⌨️ Keyboard dismissed")
+            result(true)
+        }
+    }
+}
+
+// MARK: - Terminal Input View Model
+
+@available(iOS 26.0, *)
+class TerminalInputViewModel: ObservableObject {
+    @Published var commandText: String = ""
+    @Published var placeholder: String
+    
+    var onSendCommand: ((String) -> Void)?
+    var onInputChanged: ((String) -> Void)?
+    var onDismissKeyboard: (() -> Void)?
+    var onControlKey: ((String) -> Void)?
+    
+    init(placeholder: String, onSendCommand: ((String) -> Void)?, onInputChanged: ((String) -> Void)?, onDismissKeyboard: (() -> Void)?, onControlKey: ((String) -> Void)? = nil) {
+        self.placeholder = placeholder
+        self.onSendCommand = onSendCommand
+        self.onInputChanged = onInputChanged
+        self.onDismissKeyboard = onDismissKeyboard
+        self.onControlKey = onControlKey
+    }
+    
+    func sendCommand() {
+        let trimmed = commandText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        
+        onSendCommand?(trimmed)
+        commandText = ""
+    }
+    
+    func clearInput() {
+        commandText = ""
+    }
+    
+    func setText(_ text: String) {
+        commandText = text
+    }
+    
+    func dismissKeyboard() {
+        onDismissKeyboard?()
+    }
+    
+    func sendControlKey(_ key: String) {
+        onControlKey?(key)
+    }
+}
+
+// MARK: - Terminal Input View (Liquid Glass Style)
+
+@available(iOS 26.0, *)
+struct TerminalInputView: View {
+    @ObservedObject var viewModel: TerminalInputViewModel
+    @FocusState private var isTextFieldFocused: Bool
+    @Namespace private var namespace
+    
+    var body: some View {
+        VStack(spacing: 8) {
+            // Ctrl Shortcuts Toolbar (only show when keyboard is focused)
+            if isTextFieldFocused {
+                HStack(spacing: 8) {
+                    // Ctrl+C - Terminate process
+                    ShortcutButton(label: "^C", description: "Cancel") {
+                        viewModel.sendControlKey("c")
+                    }
+                    
+                    // Ctrl+L - Clear screen
+                    ShortcutButton(label: "^L", description: "Clear") {
+                        viewModel.sendControlKey("l")
+                    }
+                    
+                    // Ctrl+R - Reverse search
+                    ShortcutButton(label: "^R", description: "Search") {
+                        viewModel.sendControlKey("r")
+                    }
+                    
+                    // Ctrl+U - Delete to start
+                    ShortcutButton(label: "^U", description: "Delete") {
+                        viewModel.sendControlKey("u")
+                    }
+                    
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.black.opacity(0.3))
+                .cornerRadius(12)
+                .padding(.horizontal, 20)
+            }
+            
+            // Main Input Bar
+            let content = HStack(spacing: 12) {
+                // Dismiss Keyboard Button (left side)
+                Button(action: {
+                    isTextFieldFocused = false
+                    viewModel.dismissKeyboard()
+                }) {
+                    Image(systemName: "keyboard.chevron.compact.down")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(Color.primary)
+                }
+                .buttonStyle(.plain)
+                
+                // TextField - single line terminal input
+                TextField(viewModel.placeholder, text: $viewModel.commandText)
+                    .font(.system(size: 16, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .textFieldStyle(.plain)
+                    .focused($isTextFieldFocused)
+                    .autocorrectionDisabled(true)
+                    .textInputAutocapitalization(.never)
+                    .submitLabel(.send)
+                    .onChange(of: viewModel.commandText) { oldValue, newValue in
+                        // Notify Flutter of text changes for real-time sync
+                        viewModel.onInputChanged?(newValue)
+                    }
+                    .onSubmit {
+                        viewModel.sendCommand()
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                
+                // Send Button (right side) - arrow.up.circle (no fill)
+                Button(action: {
+                    viewModel.sendCommand()
+                }) {
+                    Image(systemName: "arrow.up.circle")
+                        .font(.system(size: 28))
+                        .foregroundStyle(hasText ? Color.blue : Color.gray.opacity(0.5))
+                }
+                .disabled(!hasText)
+                .buttonStyle(.plain)
+                .animation(.easeInOut(duration: 0.2), value: hasText)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 8)
+            
+            // Apply same glass effect as chat input
+            return AnyView(
+                GlassEffectContainer {
+                    content
+                }
+                .glassEffect(.regular.interactive())
+                .glassEffectID("terminalInput", in: namespace)
+                .frame(height: 64)
+            )
+        }
+    }
+    
+    private var hasText: Bool {
+        !viewModel.commandText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+// MARK: - Shortcut Button Component
+@available(iOS 26.0, *)
+struct ShortcutButton: View {
+    let label: String
+    let description: String
+    let action: () -> Void
+    
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 2) {
+                Text(label)
+                    .font(.system(size: 14, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+                Text(description)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+            .frame(width: 60, height: 44)
+            .background(Color.white.opacity(0.15))
+            .cornerRadius(8)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// ============================================================================
+// MARK: - Shortcut Alerts (Native SwiftUI Alerts for ctrl/srvr/bkup)
+// ============================================================================
+
+@available(iOS 16.0, *)
+class ShortcutAlertsPlugin: NSObject, FlutterPlugin {
+    static func register(with registrar: FlutterPluginRegistrar) {
+        let channel = FlutterMethodChannel(name: "shortcut_alerts", binaryMessenger: registrar.messenger())
+        let instance = ShortcutAlertsPlugin()
+        registrar.addMethodCallDelegate(instance, channel: channel)
+    }
+    
+    func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        switch call.method {
+        case "showCtrlAlert":
+            showCtrlAlert(result: result)
+        case "showServerAlert":
+            showServerAlert(result: result)
+        case "showBackupAlert":
+            showBackupAlert(result: result)
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+    
+    private func showCtrlAlert(result: @escaping FlutterResult) {
+        DispatchQueue.main.async {
+            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                  let window = windowScene.windows.first,
+                  let rootViewController = window.rootViewController as? FlutterViewController else {
+                result(nil)
+                return
+            }
+            
+            let alert = UIAlertController(
+                title: "Ctrl Shortcuts",
+                message: "Select a control sequence",
+                preferredStyle: .actionSheet
+            )
+            
+            // The 4 essential Ctrl shortcuts
+            alert.addAction(UIAlertAction(title: "^C - Cancel Process", style: .default) { _ in
+                result("\u{03}") // Ctrl+C
+            })
+            
+            alert.addAction(UIAlertAction(title: "^L - Clear Screen", style: .default) { _ in
+                result("\u{0c}") // Ctrl+L
+            })
+            
+            alert.addAction(UIAlertAction(title: "^R - Search History", style: .default) { _ in
+                result("\u{12}") // Ctrl+R
+            })
+            
+            alert.addAction(UIAlertAction(title: "^U - Delete Line", style: .default) { _ in
+                result("\u{15}") // Ctrl+U
+            })
+            
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
+                result(nil)
+            })
+            
+            rootViewController.present(alert, animated: true)
+        }
+    }
+    
+    private func showServerAlert(result: @escaping FlutterResult) {
+        DispatchQueue.main.async {
+            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                  let window = windowScene.windows.first,
+                  let rootViewController = window.rootViewController as? FlutterViewController else {
+                result(nil)
+                return
+            }
+            
+            let alert = UIAlertController(
+                title: "Start Web Server",
+                message: "Select a server command",
+                preferredStyle: .actionSheet
+            )
+            
+            alert.addAction(UIAlertAction(title: "npm run dev", style: .default) { _ in
+                result("npm run dev")
+            })
+            
+            alert.addAction(UIAlertAction(title: "python3 -m http.server 8000", style: .default) { _ in
+                result("python3 -m http.server 8000")
+            })
+            
+            alert.addAction(UIAlertAction(title: "php -S localhost:8000", style: .default) { _ in
+                result("php -S localhost:8000")
+            })
+            
+            alert.addAction(UIAlertAction(title: "npx serve -l 3000", style: .default) { _ in
+                result("npx serve -l 3000")
+            })
+            
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
+                result(nil)
+            })
+            
+            rootViewController.present(alert, animated: true)
+        }
+    }
+    
+    private func showBackupAlert(result: @escaping FlutterResult) {
+        DispatchQueue.main.async {
+            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                  let window = windowScene.windows.first,
+                  let rootViewController = window.rootViewController as? FlutterViewController else {
+                result(nil)
+                return
+            }
+            
+            let alert = UIAlertController(
+                title: "Quick Commands",
+                message: "Select a command",
+                preferredStyle: .actionSheet
+            )
+            
+            alert.addAction(UIAlertAction(title: "tar -czf backup.tar.gz .", style: .default) { _ in
+                result("tar -czf backup.tar.gz .")
+            })
+            
+            alert.addAction(UIAlertAction(title: "git add . && git commit -m \"checkpoint\"", style: .default) { _ in
+                result("git add . && git commit -m \"checkpoint\"")
+            })
+            
+            alert.addAction(UIAlertAction(title: "npm run build", style: .default) { _ in
+                result("npm run build")
+            })
+            
+            alert.addAction(UIAlertAction(title: "docker-compose up -d", style: .default) { _ in
+                result("docker-compose up -d")
+            })
+            
+            alert.addAction(UIAlertAction(title: "pm2 restart all", style: .default) { _ in
+                result("pm2 restart all")
+            })
+            
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
+                result(nil)
+            })
+            
+            rootViewController.present(alert, animated: true)
+        }
+    }
+}
+
+// ============================================================================
+// MARK: - Terminal Tabs (Top Center - Terminal Screen)
+// ============================================================================
+// 3 native tabs for tmux sessions with tap/long-press reset functionality
+
+@available(iOS 26.0, *)
+class LiquidGlassTerminalTabsPlugin: NSObject, FlutterPlugin {
+    private var hostingController: UIHostingController<TerminalTabsView>?
+    private var methodChannel: FlutterMethodChannel?
+    private var tabsState: TerminalTabsState?
+    
+    static func register(with registrar: FlutterPluginRegistrar) {
+        let channel = FlutterMethodChannel(name: "liquid_glass_terminal_tabs", binaryMessenger: registrar.messenger())
+        let instance = LiquidGlassTerminalTabsPlugin()
+        instance.methodChannel = channel
+        registrar.addMethodCallDelegate(instance, channel: channel)
+    }
+    
+    func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        switch call.method {
+        case "isLiquidGlassSupported":
+            result(true)
+        case "show":
+            let args = call.arguments as? [String: Any]
+            let activeTab = args?["activeTab"] as? Int ?? 0
+            let tabCount = args?["tabCount"] as? Int ?? 0
+            show(activeTab: activeTab, tabCount: tabCount, result: result)
+        case "hide":
+            hide(result: result)
+        case "updateTabs":
+            let args = call.arguments as? [String: Any]
+            let activeTab = args?["activeTab"] as? Int ?? 0
+            let tabCount = args?["tabCount"] as? Int ?? 0
+            updateTabs(activeTab: activeTab, tabCount: tabCount, result: result)
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+    
+    private func show(activeTab: Int, tabCount: Int, result: @escaping FlutterResult) {
+        DispatchQueue.main.async {
+            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                  let window = windowScene.windows.first,
+                  let flutterViewController = window.rootViewController as? FlutterViewController else {
+                result(false)
+                return
+            }
+            
+            // Remove existing if any
+            window.subviews.filter { $0.tag == 9994 }.forEach { $0.removeFromSuperview() }
+            
+            let state = TerminalTabsState(activeTab: activeTab, tabCount: tabCount)
+            self.tabsState = state
+            
+            let tabsView = TerminalTabsView(
+                state: state,
+                onTabTapped: { [weak self] index in
+                    self?.methodChannel?.invokeMethod("onTabTapped", arguments: ["index": index])
+                },
+                onTabLongPressed: { [weak self] index in
+                    self?.methodChannel?.invokeMethod("onTabLongPressed", arguments: ["index": index])
+                }
+            )
+            
+            let hosting = UIHostingController(rootView: tabsView)
+            hosting.view.backgroundColor = .clear
+            hosting.view.tag = 9994
+            hosting.view.translatesAutoresizingMaskIntoConstraints = false
+            
+            window.addSubview(hosting.view)
+            
+            // Position at top center
+            NSLayoutConstraint.activate([
+                hosting.view.topAnchor.constraint(equalTo: window.safeAreaLayoutGuide.topAnchor, constant: 10),
+                hosting.view.centerXAnchor.constraint(equalTo: window.centerXAnchor),
+                hosting.view.heightAnchor.constraint(equalToConstant: 44)
             ])
             
             self.hostingController = hosting
@@ -1063,21 +1981,83 @@ class SimpleLiquidGlassURLBarPlugin: NSObject, FlutterPlugin {
                 return
             }
             
-            window.subviews.filter { $0.tag == 9990 }.forEach { $0.removeFromSuperview() }
+            window.subviews.filter { $0.tag == 9994 }.forEach { $0.removeFromSuperview() }
             self.hostingController = nil
             result(true)
         }
     }
     
-    private func updateState(url: String?, canGoBack: Bool?, canGoForward: Bool?, result: @escaping FlutterResult) {
-        // State updates are handled via SwiftUI @State - recreate the view
-        if let url = url {
-            let canBack = canGoBack ?? false
-            let canForward = canGoForward ?? false
-            show(url: url, canGoBack: canBack, canGoForward: canForward, result: result)
-        } else {
-            result(true)
+    private func updateTabs(activeTab: Int, tabCount: Int, result: @escaping FlutterResult) {
+        DispatchQueue.main.async {
+            if let state = self.tabsState {
+                state.activeTab = activeTab
+                state.tabCount = tabCount
+                result(true)
+            } else {
+                result(false)
+            }
         }
     }
 }
 
+// MARK: - Terminal Tabs State
+
+@available(iOS 26.0, *)
+class TerminalTabsState: ObservableObject {
+    @Published var activeTab: Int
+    @Published var tabCount: Int
+    
+    init(activeTab: Int, tabCount: Int) {
+        self.activeTab = activeTab
+        self.tabCount = tabCount
+    }
+}
+
+// MARK: - Terminal Tabs View
+
+@available(iOS 26.0, *)
+struct TerminalTabsView: View {
+    @ObservedObject var state: TerminalTabsState
+    let onTabTapped: (Int) -> Void
+    let onTabLongPressed: (Int) -> Void
+    @Namespace private var namespace
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            ForEach(0..<3, id: \.self) { index in
+                let tabExists = index < state.tabCount
+                let isActive = tabExists && index == state.activeTab
+                
+                GlassEffectContainer {
+                    ZStack {
+                        Text("\(index + 1)")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(isActive ? Color.blue : (tabExists ? Color.primary : Color.primary.opacity(0.3)))
+                            .frame(width: 44, height: 44)
+                            .allowsHitTesting(false)
+                        
+                        Color.clear
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if tabExists {
+                                    onTabTapped(index)
+                                }
+                            }
+                            .contextMenu(menuItems: {
+                                if tabExists && isActive {
+                                    Button(role: .destructive, action: {
+                                        onTabLongPressed(index)
+                                    }) {
+                                        Label("Reset Terminal \(index + 1)", systemImage: "arrow.clockwise")
+                                    }
+                                }
+                            })
+                    }
+                    .glassEffect(.regular.interactive())
+                    .glassEffectID("terminalTab\(index)", in: namespace)
+                }
+            }
+        }
+    }
+}

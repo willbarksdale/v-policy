@@ -34,6 +34,12 @@ import UIKit
     // Register Liquid Glass URL bar plugin
     SimpleLiquidGlassURLBarPlugin.register(with: self.registrar(forPlugin: "SimpleLiquidGlassURLBarPlugin")!)
     
+    // Register Liquid Glass toast plugin
+    LiquidGlassToastPlugin.register(with: self.registrar(forPlugin: "LiquidGlassToastPlugin")!)
+    
+    // Register Shortcut Alerts plugin
+    ShortcutAlertsPlugin.register(with: self.registrar(forPlugin: "ShortcutAlertsPlugin")!)
+    
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 }

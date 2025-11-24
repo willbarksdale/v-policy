@@ -100,6 +100,7 @@ class LiquidGlassTerminalInput {
   static Function()? _onDismissKeyboard;
   static Function()? _onKeyboardShow;
   static Function()? _onKeyboardHide;
+  static Function(String)? _onControlKey;
 
   static Future<bool> isSupported() async {
     try {
@@ -116,12 +117,14 @@ class LiquidGlassTerminalInput {
     Function()? onDismissKeyboard,
     Function()? onKeyboardShow,
     Function()? onKeyboardHide,
+    Function(String)? onControlKey,
   }) async {
     _onCommandSent = onCommandSent;
     _onInputChanged = onInputChanged;
     _onDismissKeyboard = onDismissKeyboard;
     _onKeyboardShow = onKeyboardShow;
     _onKeyboardHide = onKeyboardHide;
+    _onControlKey = onControlKey;
 
     _channel.setMethodCallHandler((call) async {
       switch (call.method) {
@@ -141,6 +144,10 @@ class LiquidGlassTerminalInput {
           break;
         case 'onKeyboardHide':
           _onKeyboardHide?.call();
+          break;
+        case 'onControlKey':
+          final key = call.arguments['key'] as String?;
+          if (key != null) _onControlKey?.call(key);
           break;
       }
     });
@@ -348,9 +355,11 @@ class TmuxService {
             _eventController.add(TmuxError('Session $i error: $error'));
           },
           onDone: () {
-            debugPrint('   ⚠️ Session $i closed');
-            _sessions[i] = null;
+            debugPrint('   ⚠️ Session $i stdout closed');
+            // Don't immediately null out - check if session is actually dead
+            _checkAndReattachSession(i, sessionName);
           },
+          cancelOnError: false, // Keep listening even after errors
         );
         
         // Listen to stderr only for logging errors (don't send to terminal display)
@@ -387,6 +396,76 @@ class TmuxService {
     }
   }
   
+  /// Check and reattach a session if it got disconnected
+  Future<void> _checkAndReattachSession(int sessionIndex, String sessionName) async {
+    debugPrint('🔍 Checking session $sessionIndex status...');
+    
+    // Wait a bit to see if it's just a temporary closure
+    await Future.delayed(const Duration(milliseconds: 500));
+    
+    // If SSH is still connected and we're initialized, try to reattach
+    if (_sshService.isConnected && _isInitialized) {
+      debugPrint('⚠️ Session $sessionIndex closed but SSH still connected - attempting reattach...');
+      
+      try {
+        // Create new SSH shell session
+        final session = await _sshService.shell(
+          terminalWidth: 40,
+          terminalHeight: 50,
+        );
+        
+        if (session == null) {
+          debugPrint('❌ Failed to open shell for session $sessionIndex reattach');
+          _sessions[sessionIndex] = null;
+          return;
+        }
+        
+        // Attach to existing tmux session
+        session.write(utf8.encode('tmux attach-session -t $sessionName\n'));
+        
+        // Store the new session
+        _sessions[sessionIndex] = session;
+        
+        // Re-subscribe to output
+        _subscriptions[sessionIndex]?.cancel();
+        _subscriptions[sessionIndex] = session.stdout.listen(
+          (data) => _handleSessionOutput(sessionIndex, data),
+          onError: (error) {
+            debugPrint('   ❌ Session $sessionIndex error after reattach: $error');
+            _eventController.add(TmuxError('Session $sessionIndex error: $error'));
+          },
+          onDone: () {
+            debugPrint('   ⚠️ Session $sessionIndex closed again after reattach');
+            _sessions[sessionIndex] = null;
+          },
+          cancelOnError: false,
+        );
+        
+        // Re-listen to stderr
+        session.stderr.listen(
+          (data) {
+            final output = utf8.decode(data);
+            debugPrint('   ⚠️ Session $sessionIndex stderr after reattach: ${output.trim()}');
+          },
+          onError: (error) {
+            debugPrint('   ❌ Session $sessionIndex stderr error after reattach: $error');
+          },
+        );
+        
+        debugPrint('✅ Session $sessionIndex reattached successfully');
+        _eventController.add(TmuxSessionReady(sessionIndex, sessionName));
+        
+      } catch (e) {
+        debugPrint('❌ Failed to reattach session $sessionIndex: $e');
+        _sessions[sessionIndex] = null;
+        _eventController.add(TmuxError('Failed to reattach session: $e'));
+      }
+    } else {
+      debugPrint('❌ Cannot reattach session $sessionIndex - SSH disconnected or tmux not initialized');
+      _sessions[sessionIndex] = null;
+    }
+  }
+  
   /// Switch to a specific session (0, 1, or 2)
   Future<bool> switchToSession(int sessionIndex) async {
     debugPrint('🔄 Switching to session $sessionIndex');
@@ -401,9 +480,16 @@ class TmuxService {
       return false;
     }
     
+    // If session is null, try to reattach
     if (_sessions[sessionIndex] == null) {
-      debugPrint('❌ Session $sessionIndex not available');
-      return false;
+      debugPrint('⚠️ Session $sessionIndex not available - attempting reattach...');
+      await _checkAndReattachSession(sessionIndex, sessionNames[sessionIndex]);
+      
+      // Check again after reattach attempt
+      if (_sessions[sessionIndex] == null) {
+        debugPrint('❌ Session $sessionIndex still not available after reattach attempt');
+        return false;
+      }
     }
     
     _activeSessionIndex = sessionIndex;
@@ -415,19 +501,25 @@ class TmuxService {
   
   /// Send input to the currently active session
   Future<void> sendInput(String text) async {
+    debugPrint('📝 Sending to terminal: "$text" (length: ${text.length})');
     if (!_isInitialized) {
       debugPrint('❌ Cannot send input: tmux not initialized');
       return;
     }
     
+    debugPrint('🔍 Debug - Active session index: $_activeSessionIndex');
+    debugPrint('🔍 Debug - Sessions status: [${_sessions[0] != null ? "✓" : "✗"}, ${_sessions[1] != null ? "✓" : "✗"}, ${_sessions[2] != null ? "✓" : "✗"}]');
+    
     final activeSession = _sessions[_activeSessionIndex];
     if (activeSession == null) {
-      debugPrint('❌ Cannot send input: active session not available');
+      debugPrint('❌ Cannot send input: active session $_activeSessionIndex not available');
+      debugPrint('SSH connection status: isConnected=${_sshService.isConnected}');
       return;
     }
     
     try {
       activeSession.write(utf8.encode(text));
+      debugPrint('✅ Input sent to session $_activeSessionIndex');
     } catch (e) {
       debugPrint('❌ Error sending input to session $_activeSessionIndex: $e');
     }
@@ -985,15 +1077,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
   static const int maxCustomShortcuts = 10;
   static const String _customShortcutsKey = 'custom_terminal_shortcuts';
   
-  // Server commands for web development
-  static const List<Map<String, String>> _serverCommands = [
-    {'command': 'npm run dev', 'description': 'Vite, Next.js, or other modern dev server'},
-    {'command': 'npm start', 'description': 'Create React App or standard Node server'},
-    {'command': 'python3 -m http.server 3000', 'description': 'Quick static file server on port 3000'},
-    {'command': 'npx serve -s build -p 3000', 'description': 'Serve production build files'},
-    {'command': 'php -S 0.0.0.0:3000', 'description': 'PHP development server'},
-  ];
-
   @override
   void initState() {
     super.initState();
@@ -1108,6 +1191,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
           });
         }
       },
+      onControlKey: (key) {
+        // Handle Ctrl+key shortcuts
+        // Send the control character directly to terminal
+        final controlChar = String.fromCharCode(key.codeUnitAt(0) - 96); // a=1, c=3, l=12, r=18, u=21
+        ref.read(terminalTabsProvider.notifier).sendInput(controlChar);
+        debugPrint('🎮 Control key pressed: Ctrl+$key (char code: ${controlChar.codeUnitAt(0)})');
+      },
     );
     
     // Show the input
@@ -1142,6 +1232,25 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       _handlePowerButtonTap();
     });
     
+    // Set up callbacks for native disconnect alert
+    LiquidGlassPowerButton.setDisconnectCallbacks(
+      onConfirmed: () async {
+        await _disconnect();
+        if (mounted) {
+          setState(() {
+            _isDisconnecting = false;
+          });
+        }
+      },
+      onCancelled: () {
+        if (mounted) {
+          setState(() {
+            _isDisconnecting = false;
+          });
+        }
+      },
+    );
+    
     // Show the power button in connected state (blue)
     await LiquidGlassPowerButton.show(isConnected: true);
   }
@@ -1163,7 +1272,21 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
   }
   
   void _handlePlayButtonTap() async {
-    debugPrint('▶️ Play button tapped - checking for running server');
+    debugPrint('▶️ Play button tapped - checking for preview');
+    
+    // Check if we have a cached preview URL first (instant navigation!)
+    final cachedUrl = ref.read(cachedPreviewUrlProvider);
+    
+    if (cachedUrl != null) {
+      debugPrint('⚡ Using cached preview URL: $cachedUrl');
+      
+      // Instant navigation to cached preview - no server detection needed!
+      _navigateToPreview(cachedUrl);
+      return;
+    }
+    
+    // No cache - do full server detection (first time or after disconnect)
+    debugPrint('🔍 No cached URL, detecting server...');
     
     // Update button to loading state
     await LiquidGlassPlayButton.updateState(isLoading: true);
@@ -1205,29 +1328,18 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     await LiquidGlassPlayButton.updateState(isLoading: false);
     
     if (detectedPort == null) {
-      // No server detected - show snackbar
+      // No server detected - show native toast
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: const Text(
-              'No server detected. Start your dev server in the terminal to preview.',
-              style: TextStyle(color: Colors.white),
-            ),
-            backgroundColor: Colors.orange,
-            behavior: SnackBarBehavior.floating,
-            margin: EdgeInsets.only(
-              bottom: MediaQuery.of(context).size.height - 200,
-              left: 20,
-              right: 20,
-            ),
-            duration: const Duration(seconds: 3),
-          ),
+        await LiquidGlassToast.show(
+          message: 'No server detected. Start your dev server in the terminal to preview.',
+          style: 'info',
+          duration: 3.0,
         );
       }
       return;
     }
     
-    // Server detected - get host IP and navigate to preview
+    // Server detected - get host IP and build preview URL
     final hostIp = ref.read(sshServiceProvider).hostIp;
     if (hostIp == null) {
       debugPrint('❌ Host IP is null');
@@ -1235,7 +1347,25 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     }
     
     final previewUrl = 'http://$hostIp:$detectedPort';
-    debugPrint('✅ Opening preview: $previewUrl');
+    debugPrint('✅ Server found, caching and navigating: $previewUrl');
+    
+    // Cache the URL for instant future toggles
+    ref.read(cachedPreviewUrlProvider.notifier).state = previewUrl;
+    
+    // Navigate to preview
+    _navigateToPreview(previewUrl);
+  }
+  
+  /// Navigate to preview screen (extracted for reuse with cache)
+  Future<void> _navigateToPreview(String previewUrl) async {
+    // Get host IP for WebView
+    final hostIp = ref.read(sshServiceProvider).hostIp;
+    if (hostIp == null) {
+      debugPrint('❌ Host IP is null');
+      return;
+    }
+    
+    debugPrint('🚀 Navigating to preview: $previewUrl');
     
     // Hide terminal UI before navigating
     if (_liquidGlassTerminalTabsShown) {
@@ -1278,63 +1408,83 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     }
   }
   
-  void _handlePowerButtonTap() {
+  void _handlePowerButtonTap() async {
     // Prevent multiple dialogs
     if (_isDisconnecting) return;
     
     _isDisconnecting = true;
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: Colors.black,
-        title: const Text(
-          'End session?',
-          style: TextStyle(color: Colors.white, fontSize: 20),
-          textAlign: TextAlign.center,
-        ),
-        actionsAlignment: MainAxisAlignment.center,
-        actions: [
-          IconButton(
-            onPressed: () {
-              Navigator.pop(context);
-              _isDisconnecting = false;
-            },
-            icon: const Icon(Icons.close, color: Colors.white),
-          ),
-          IconButton(
-            onPressed: () async {
-              Navigator.pop(context);
-              await _disconnect();
-              _isDisconnecting = false;
-            },
-            icon: const Icon(Icons.check, color: Colors.white),
-          ),
-        ],
-      ),
-    ).then((_) {
-      // Ensure flag is reset even if dialog is dismissed other ways
-      _isDisconnecting = false;
-    });
+    
+    // Show native Swift alert
+    await LiquidGlassPowerButton.showDisconnectAlert();
   }
   
   Future<void> _disconnect() async {
+    debugPrint('🔌 Starting disconnect sequence...');
+    
     try {
+      // 1. Hide all terminal-specific UI elements first
+      debugPrint('🧹 Hiding terminal UI elements...');
+      
+      if (_liquidGlassTerminalTabsShown) {
+        await LiquidGlassTerminalTabs.hide();
+        _liquidGlassTerminalTabsShown = false;
+      }
+      
+      if (_liquidGlassTerminalInputShown) {
+        await LiquidGlassTerminalInput.hide();
+        _liquidGlassTerminalInputShown = false;
+      }
+      
+      // Always hide play button (even if flag not set, to be safe)
+      await LiquidGlassPlayButton.hide();
+      
+      debugPrint('✅ Terminal UI elements hidden');
+      
+      // 2. Disconnect SSH (this will also clean up all tmux sessions)
+      debugPrint('🔌 Disconnecting SSH...');
       await ref.read(sshServiceProvider.notifier).disconnect();
       
-      // Clear connection state
+      // 3. Clear connection state
       ref.read(connectedIpProvider.notifier).state = null;
       ref.read(connectedUsernameProvider.notifier).state = null;
+      ref.read(cachedPreviewUrlProvider.notifier).state = null; // Clear cached preview URL
+      ref.read(detectedServerPortProvider.notifier).state = null; // Clear detected port
       
-      // Update power button state to disconnected before navigating back
+      // 4. Update power button to disconnected state
       await LiquidGlassPowerButton.updateState(isConnected: false);
       
-      // Navigate back to SSH screen (buttons will remain visible)
+      debugPrint('✅ SSH disconnected');
+      
+      // 5. ALWAYS navigate back to SSH screen (force navigation)
       if (mounted) {
-        Navigator.of(context).pop();
+        debugPrint('🔙 Navigating back to SSH screen...');
+        
+        // Use popUntil to ensure we get back to SSH screen
+        // This handles edge cases where we might be deep in navigation
+        Navigator.of(context).popUntil((route) {
+          // Pop until we're at the first route (SSH screen)
+          return route.isFirst;
+        });
+        
+        debugPrint('✅ Navigation complete - back to SSH screen');
       }
-    } catch (e) {
-      debugPrint('Error disconnecting: $e');
+      
+      // 6. Reset the disconnecting flag
       if (mounted) {
+        setState(() {
+          _isDisconnecting = false;
+        });
+      }
+      
+    } catch (e) {
+      debugPrint('❌ Error disconnecting: $e');
+      
+      // Reset flag on error
+      if (mounted) {
+        setState(() {
+          _isDisconnecting = false;
+        });
+        
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Failed to disconnect: $e'),
@@ -1463,7 +1613,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
             padding: const EdgeInsets.only(top: 30),
             child: Text(
               'Connect to your server to use terminal',
-              style: TextStyle(color: Colors.grey[400], fontSize: 16),
+              style: TextStyle(
+                color: Colors.grey[400],
+                fontSize: 16,
+                decoration: TextDecoration.none,
+              ),
             ),
           ),
         ),
@@ -1616,7 +1770,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                       _buildShortcutButton('←', '\x1b[D'),
                       _buildShortcutButton('→', '\x1b[C'),
                       _buildServerButton(),
-                      _buildBackupButton(),
                       _buildCustomButton('cstm'),
                     ],
                   ),
@@ -1908,48 +2061,22 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 2.0),
       child: Material(
-        color: Colors.blue[700],
+        color: Colors.grey[800],
         borderRadius: BorderRadius.circular(6),
         child: InkWell(
           borderRadius: BorderRadius.circular(6),
-          onTap: () {
-            showDialog(
-              context: context,
-              builder: (context) => AlertDialog(
-                backgroundColor: const Color(0xFF1a1a1a),
-                title: const Text(
-                  'Start Web Server',
-                  style: TextStyle(color: Colors.white),
-                ),
-                content: SizedBox(
-                  width: double.maxFinite,
-                  child: ListView.builder(
-                    shrinkWrap: true,
-                    itemCount: _serverCommands.length,
-                    itemBuilder: (context, index) {
-                      final cmd = _serverCommands[index];
-                      return ListTile(
-                        title: Text(
-                          cmd['command']!,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontFamily: 'monospace',
-                          ),
-                        ),
-                        subtitle: Text(
-                          cmd['description']!,
-                          style: TextStyle(color: Colors.grey[400]),
-                        ),
-                        onTap: () {
-                          Navigator.pop(context);
-                          _sendCommand(cmd['command']!);
-                        },
-                      );
-                    },
-                  ),
-                ),
-              ),
-            );
+          onTap: () async {
+            // Use native SwiftUI alert
+            const channel = MethodChannel('shortcut_alerts');
+            
+            try {
+              final result = await channel.invokeMethod('showServerAlert');
+              if (result != null && result is String) {
+                _sendCommand(result);
+              }
+            } catch (e) {
+              debugPrint('❌ Error showing native server alert: $e');
+            }
           },
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -1967,148 +2094,19 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     );
   }
 
-  Widget _buildBackupButton() {
-    // Common backup/utility commands
-    final backupCommands = [
-      {'command': 'tar -czf backup.tar.gz .', 'description': 'Backup current directory'},
-      {'command': 'git add . && git commit -m "checkpoint"', 'description': 'Git checkpoint'},
-      {'command': 'npm run build', 'description': 'Build project'},
-      {'command': 'docker-compose up -d', 'description': 'Start Docker containers'},
-      {'command': 'pm2 restart all', 'description': 'Restart PM2 processes'},
-    ];
-
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 2.0),
-      child: Material(
-        color: Colors.green[700],
-        borderRadius: BorderRadius.circular(6),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(6),
-          onTap: () {
-            showDialog(
-              context: context,
-              builder: (context) => AlertDialog(
-                backgroundColor: const Color(0xFF1a1a1a),
-                title: const Text(
-                  'Quick Commands',
-                  style: TextStyle(color: Colors.white),
-                ),
-                content: SizedBox(
-                  width: double.maxFinite,
-                  child: ListView.builder(
-                    shrinkWrap: true,
-                    itemCount: backupCommands.length,
-                    itemBuilder: (context, index) {
-                      final cmd = backupCommands[index];
-                      return ListTile(
-                        title: Text(
-                          cmd['command']!,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontFamily: 'monospace',
-                            fontSize: 13,
-                          ),
-                        ),
-                        subtitle: Text(
-                          cmd['description']!,
-                          style: TextStyle(color: Colors.grey[400], fontSize: 12),
-                        ),
-                        onTap: () {
-                          Navigator.pop(context);
-                          _sendCommand(cmd['command']!);
-                        },
-                      );
-                    },
-                  ),
-                ),
-              ),
-            );
-          },
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: const Text(
-              'bkup',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  void _showCtrlMenu() {
-    final ctrlCommands = [
-      {'key': 'Ctrl+C', 'sequence': '\x03', 'description': 'Interrupt (cancel current process)'},
-      {'key': 'Ctrl+D', 'sequence': '\x04', 'description': 'EOF (exit shell or end input)'},
-      {'key': 'Ctrl+Z', 'sequence': '\x1a', 'description': 'Suspend process (send to background)'},
-      {'key': 'Ctrl+L', 'sequence': '\x0c', 'description': 'Clear screen'},
-      {'key': 'Ctrl+A', 'sequence': '\x01', 'description': 'Move cursor to beginning of line'},
-      {'key': 'Ctrl+E', 'sequence': '\x05', 'description': 'Move cursor to end of line'},
-      {'key': 'Ctrl+U', 'sequence': '\x15', 'description': 'Delete from cursor to start of line'},
-      {'key': 'Ctrl+K', 'sequence': '\x0b', 'description': 'Delete from cursor to end of line'},
-      {'key': 'Ctrl+W', 'sequence': '\x17', 'description': 'Delete word before cursor'},
-      {'key': 'Ctrl+R', 'sequence': '\x12', 'description': 'Reverse search command history'},
-    ];
-
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF1a1a1a),
-        title: const Text(
-          'Ctrl Shortcuts',
-          style: TextStyle(color: Colors.white),
-        ),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'Tap to send control sequence',
-                style: TextStyle(color: Colors.grey[400], fontSize: 14),
-              ),
-              const SizedBox(height: 16),
-              Flexible(
-                child: ListView.builder(
-                  shrinkWrap: true,
-                  itemCount: ctrlCommands.length,
-                  itemBuilder: (context, index) {
-                    final cmd = ctrlCommands[index];
-                    return ListTile(
-                      title: Text(
-                        cmd['key']!,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      subtitle: Text(
-                        cmd['description']!,
-                        style: TextStyle(color: Colors.grey[400], fontSize: 12),
-                      ),
-                      onTap: () {
-                        Navigator.pop(context);
-                        _sendKeys(cmd['sequence']!);
-                      },
-                    );
-                  },
-                ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Close', style: TextStyle(color: Colors.blue)),
-          ),
-        ],
-      ),
-    );
+  Future<void> _showCtrlMenu() async {
+    // Use native SwiftUI alert with 4 essential Ctrl shortcuts
+    const channel = MethodChannel('shortcut_alerts');
+    
+    try {
+      final result = await channel.invokeMethod('showCtrlAlert');
+      if (result != null && result is String) {
+        // User selected a shortcut, send it to terminal
+        _sendKeys(result);
+      }
+    } catch (e) {
+      debugPrint('❌ Error showing native ctrl alert: $e');
+    }
   }
 
   Widget _buildCustomButton(String label) {
